@@ -47,7 +47,7 @@ export class RoundStats {
 
     prepareMessage(now: number): void {
         if (!this.isRunning || this.message) return
-        this.ttftMs = undefined
+        // 保留上次 TTFT，直到本次调用的首个非空 delta 到达。
         this.message = {
             startedAt: now,
             generationStartedAt: undefined,
@@ -98,7 +98,7 @@ export class RoundStats {
                 ? 0
                 : Math.max(0, (this.endedAt ?? now) - this.startedAt)
 
-        // 等待后续调用的首字时，沿用本轮已完成的平均速度。
+        // 后续调用等待首字或采样不足时，沿用本轮已完成的平均速度。
         let tps =
             this.generationMs > 0
                 ? (this.outputTokens * 1_000) / this.generationMs
@@ -113,7 +113,7 @@ export class RoundStats {
             tps =
                 now - message.generationStartedAt >= WINDOW_MS
                     ? (message.samples.length * 1_000) / WINDOW_MS
-                    : undefined
+                    : tps
         }
         const ttft =
             this.ttftMs !== undefined

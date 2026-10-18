@@ -205,7 +205,7 @@ test('平均 TPS 从调用开始计时，重复准备消息和后续 delta 不�
     })
 })
 
-test('后续模型调用等待首字时沿用已完成平均速度，不闪回占位符', () => {
+test('后续模型调用等待首字和采样不足时沿用已完成平均速度，不闪回占位符', () => {
     const stats = new RoundStats()
     stats.start(0)
     stats.prepareMessage(0)
@@ -216,8 +216,38 @@ test('后续模型调用等待首字时沿用已完成平均速度，不闪回�
     assert.deepEqual(stats.snapshot(5_000), {
         tps: 50_000 / 2_100,
         elapsedMs: 5_000,
-        ttft: { elapsedMs: 2000, waiting: true },
+        ttft: { elapsedMs: 100, waiting: false },
     })
+
+    stats.recordDelta(5_000)
+    assert.equal(stats.snapshot(5_000).tps, 50_000 / 2_100)
+    stats.recordDelta(5_500)
+    assert.equal(stats.snapshot(5_999).tps, 50_000 / 2_100)
+    assert.equal(stats.snapshot(6_000).tps, 1)
+    assert.equal(stats.snapshot(6_500).tps, 0)
+})
+
+test('后续短调用和空失败不清除 TPS，下一次采样沿用更新后的累计平均值', () => {
+    const stats = new RoundStats()
+    stats.start(0)
+    stats.prepareMessage(0)
+    stats.recordDelta(100)
+    stats.endMessage(50, 2_000)
+
+    stats.prepareMessage(3_000)
+    stats.recordDelta(3_100)
+    assert.equal(stats.snapshot(3_200).tps, 25)
+    stats.endMessage(10, 3_500)
+    assert.equal(stats.snapshot(3_500).tps, 24)
+
+    stats.prepareMessage(4_000)
+    stats.endMessage(0, 5_000)
+    assert.equal(stats.snapshot(5_000).tps, 24)
+
+    stats.prepareMessage(6_000)
+    stats.recordDelta(6_100)
+    assert.equal(stats.snapshot(7_099).tps, 24)
+    assert.equal(stats.snapshot(7_100).tps, 0)
 })
 
 test('最终平均 TPS 包含首字等待，不受实时窗口最小采样限制', () => {
@@ -314,7 +344,7 @@ test('显示层对无效 TPS 和耗时安全降级', () => {
     }
 })
 
-test('TTFT 等待时递增，首 token 后冻结，工具期间保留，下次调用重置', () => {
+test('TTFT 首次等待时递增，后续等待和失败保留旧值，首 token 到达才更新', () => {
     const stats = new RoundStats()
     assert.equal(stats.snapshot(0).ttft, undefined)
     stats.start(0)
@@ -337,14 +367,27 @@ test('TTFT 等待时递增，首 token 后冻结，工具期间保留，下次�
     })
     stats.prepareMessage(10_000)
     assert.deepEqual(stats.snapshot(10_500).ttft, {
-        elapsedMs: 500,
-        waiting: true,
+        elapsedMs: 1_230,
+        waiting: false,
     })
     stats.endMessage(0, 11_000)
-    assert.equal(stats.snapshot(11_000).ttft, undefined)
+    assert.deepEqual(stats.snapshot(11_000).ttft, {
+        elapsedMs: 1_230,
+        waiting: false,
+    })
     stats.prepareMessage(12_000)
+    stats.recordDelta(12_500)
+    assert.deepEqual(stats.snapshot(12_500).ttft, {
+        elapsedMs: 500,
+        waiting: false,
+    })
+    stats.endMessage(10, 12_600)
+    stats.prepareMessage(12_700)
     stats.finish(13_000)
-    assert.equal(stats.snapshot(20_000).ttft, undefined)
+    assert.deepEqual(stats.snapshot(20_000).ttft, {
+        elapsedMs: 500,
+        waiting: false,
+    })
     stats.start(30_000)
     assert.equal(stats.snapshot(30_000).ttft, undefined)
 })

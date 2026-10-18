@@ -115,6 +115,35 @@ test('等待首字时持续计时，结束后强制更新且停止计时器', (t
     assert.equal(h.updates.length, count)
 })
 
+test('工具后的调用在等待及采样不足时保留 TPS，限频刷新后再切换实时值', (t) => {
+    const h = harness(t)
+    const delta = {
+        assistantMessageEvent: { type: 'text_delta', delta: 'x' },
+    }
+    h.emit('agent_start')
+    h.emit('turn_start')
+    h.emit('message_update', delta)
+    h.tick(2_000)
+    h.emit('message_end', {
+        message: { role: 'assistant', usage: { output: 50 } },
+    })
+    assert.match(h.updates.at(-1) ?? '', /TPS: 25\.0 tok\/s/)
+
+    h.tick(3_000)
+    h.emit('turn_start')
+    h.tick(1_000)
+    assert.match(h.updates.at(-1) ?? '', /TPS: 25\.0 tok\/s/)
+    h.emit('message_update', delta)
+    h.tick(33)
+    assert.match(h.updates.at(-1) ?? '', /TPS: 25\.0 tok\/s/)
+    h.tick(467)
+    h.emit('message_update', delta)
+    assert.match(h.updates.at(-1) ?? '', /TPS: 25\.0 tok\/s/)
+    h.tick(500)
+    assert.match(h.updates.at(-1) ?? '', /TPS: 1\.0 tok\/s/)
+    h.emit('agent_settled')
+})
+
 test('文本、思考和任意工具参数均计入输出，空 delta 和工具结果不计入', (t) => {
     const h = harness(t)
     h.emit('agent_start')
@@ -192,7 +221,7 @@ test('只有最终 usage 的消息也参与统计，不会漏掉 token', (t) => 
     )
 })
 
-test('TTFT 完整事件链：等待、首字冻结、工具保留、下次调用重置和取消', (t) => {
+test('TTFT 完整事件链：首次等待、首字冻结、后续等待保留、新值更新和取消', (t) => {
     const h = harness(t)
     h.emit('agent_start')
     h.emit('turn_start')
@@ -211,10 +240,27 @@ test('TTFT 完整事件链：等待、首字冻结、工具保留、下次调用
     h.tick(5_000)
     assert.match(h.updates.at(-1) ?? '', /TTFT: 1\.23s ⏳/)
     h.emit('turn_start')
-    assert.match(h.updates.at(-1) ?? '', /TTFT: -- ⏳/)
+    assert.match(h.updates.at(-1) ?? '', /TTFT: 1\.23s ⏳/)
     h.tick(1_000)
-    assert.match(h.updates.at(-1) ?? '', /TTFT: -- ⏳/)
+    assert.match(h.updates.at(-1) ?? '', /TTFT: 1\.23s ⏳/)
+    h.emit('message_update', {
+        assistantMessageEvent: { type: 'text_delta', delta: '' },
+    })
+    assert.match(h.updates.at(-1) ?? '', /TTFT: 1\.23s ⏳/)
+    h.tick(500)
+    h.emit('message_update', {
+        assistantMessageEvent: { type: 'text_delta', delta: 'x' },
+    })
+    assert.match(h.updates.at(-1) ?? '', /TTFT: 1\.50s ⏳/)
+    h.emit('message_end', {
+        message: { role: 'assistant', usage: { output: 10 } },
+    })
+    h.emit('turn_start')
+    h.tick(1_000)
     h.emit('agent_settled', { aborted: true })
+    assert.match(h.updates.at(-1) ?? '', /TTFT: 1\.50s ⏳/)
+    h.emit('agent_start')
+    h.emit('turn_start')
     assert.match(h.updates.at(-1) ?? '', /TTFT: -- ⏳/)
 })
 
