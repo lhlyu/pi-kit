@@ -1,25 +1,35 @@
 # @lhlyu/pi-kit
 
-个人专属的 Pi Coding Agent 工具箱，提供终端状态统计与多 Provider 模型自动发现。
+个人专属的 Pi Coding Agent 工具箱。
+
+## 功能
+
+- **模型自动发现**：支持多个 Provider，无需手动维护模型列表。
+- **终端状态栏**：展示输出速度（TPS）、首 token 耗时（TTFT）和本轮耗时（TS）。
+
+```text
+⚡ TPS: 50.0 tok/s 🚀 TTFT: 1.23s ⏳ TS: 2m35s
+```
 
 ## 安装
 
-需要 Node.js ≥ 22.19.0 和 Pi Coding Agent ≥ 1.3.0。
+需要 Node.js ≥ 22.19.0、Pi Coding Agent ≥ 1.3.0。
 
 ```bash
 pi install npm:@lhlyu/pi-kit
 ```
 
-### 启用模型发现
+## 使用
 
-在 Pi 用户目录的 `models.json` 中添加独立 Provider：
+状态栏在交互式终端中自动启用，无需配置。
+
+如需模型自动发现，在 Pi 用户目录的 `models.json` 中添加 Provider：
 
 ```json
 {
     "providers": {
         "my-relay": {
             "baseUrl": "https://relay.example.com/v1",
-            "modelsUrl": "https://relay.example.com/v1/models",
             "apiKey": "$RELAY_API_KEY",
             "api": "openai-completions",
             "discoverModels": true
@@ -28,28 +38,6 @@ pi install npm:@lhlyu/pi-kit
 }
 ```
 
-设置对应环境变量，启动或执行 `/reload` 后，通过 `/model` 选择模型。`modelsUrl` 可省略，默认请求 `baseUrl` 下的 `/models`。更多说明见[模型发现配置](docs/model-discovery.md)。
+设置 `RELAY_API_KEY` 环境变量，重启 Pi 或执行 `/reload`，再通过 `/model` 选择模型。
 
-## 特征
-
-- **模型自动发现**：支持多个独立 Provider，无需维护模型列表；启动和 `/reload` 时刷新，失败时保留上次成功缓存，打开 `/model` 不联网发现。
-- **生成速度（TPS）**：实时展示输出速度，结束后显示本轮平均速度；实时数值为估算值。
-- **首 token 耗时（TTFT）**：展示最近一次模型调用从 `turn_start` 到首个非空 text/thinking/toolcall delta 的客户端延迟（包含请求前处理和网络等待），不代表服务端纯推理耗时；等待时递增并带 `…`，收到首 token 后冻结，工具执行期间保留。下一次调用重新计时，无内容便结束或取消时显示 `--`。
-- **本轮耗时（TS）**：展示整轮任务耗时，包含模型等待与工具执行时间。
-- **自动更新**：任务开始时重置统计，执行期间持续更新，结束后保留结果。
-- **终端状态栏**：仅在交互式终端中显示，不影响其他运行模式。
-
-```text
-⚡ TPS: 50.0 tok/s 🚀 TTFT: 1.23s ⏳ TS: 2m35s
-```
-
-## 发布
-
-版本号即发布：把 `package.json` 中的 `version` 改为新的正式版本并推送到 `main`，工作流会校验版本、执行 `npm run check`、发布到 npm，并创建 `vX.Y.Z` Release。同一提交重跑时跳过上传，只补建 Release。
-
-认证只使用 Trusted Publishing（OIDC），仓库不保存任何 npm token：
-
-- 工作流需要 `id-token: write` 与 npm ≥ 11.5.1，且必须在 GitHub 托管 runner 上运行。
-- 包必须已存在，才能在 npmjs.com 的包设置里把 `.github/workflows/publish.yml` 配为 Trusted Publisher。首次创建包需要先在本地 `npm login && npm publish` 发布一次。
-- 新建的 Trusted Publisher 需在 2 天内完成首次成功发布，否则配置过期需重建。
-- 发布要求 `package.json` 的 `repository.url` 与仓库一致；公开仓库才会自动生成 provenance。
+更多配置见 [模型发现配置](docs/model-discovery.md)。
