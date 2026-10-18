@@ -41,3 +41,14 @@ pi install npm:@lhlyu/pi-kit
 ```text
 ⚡ TPS: 50.0 tok/s ⏳ TS: 2m35s
 ```
+
+## 发布
+
+版本号即发布：把 `package.json` 中的 `version` 改为新的正式版本并推送到 `main`，工作流会校验版本、执行 `npm run check`、发布到 npm，并创建 `vX.Y.Z` Release。同一提交重跑时跳过上传，只补建 Release。
+
+认证只使用 Trusted Publishing（OIDC），仓库不保存任何 npm token：
+
+- 工作流需要 `id-token: write` 与 npm ≥ 11.5.1，且必须在 GitHub 托管 runner 上运行。
+- 包必须已存在，才能在 npmjs.com 的包设置里把 `.github/workflows/publish.yml` 配为 Trusted Publisher。首次创建包需要先在本地 `npm login && npm publish` 发布一次。
+- 新建的 Trusted Publisher 需在 2 天内完成首次成功发布，否则配置过期需重建。
+- 发布要求 `package.json` 的 `repository.url` 与仓库一致；公开仓库才会自动生成 provenance。

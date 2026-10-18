@@ -4,6 +4,8 @@ on:
   push:
     branches: [main]
     paths: [package.json]
+  # 仅用于重跑同一提交的发布，不改变版本号语义。
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -17,6 +19,8 @@ jobs:
   publish:
     name: 发布
     runs-on: ubuntu-latest
+    # 只允许从 main 发布，避免 workflow_dispatch 从任意分支推出未合并代码。
+    if: github.ref == 'refs/heads/main'
     steps:
       - name: 拉取代码
         uses: actions/checkout@v7.0.1
@@ -39,15 +43,18 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
       - name: 更新 npm
         if: steps.version.outputs.publish == 'true'
-        run: npm install --global npm@11 --ignore-scripts
+        # Trusted Publishing 需要 npm >= 11.5.1。
+        run: npm install --global 'npm@^11.5.1' --ignore-scripts
       - name: 安装依赖
         if: steps.version.outputs.publish == 'true'
         run: npm ci --ignore-scripts
       # prepack 自动执行 npm run check，通过后才会上传 TypeScript 源码。
-      # 认证走 Trusted Publishing（OIDC）：需要 id-token: write、npm >= 11.5.1，
-      # 且包已存在并在 npmjs.com 配好本 workflow 为 Trusted Publisher。
+      # 认证只用 Trusted Publishing（OIDC），不保存任何 npm token：
+      # 依赖 id-token: write、npm >= 11.5.1，以及 npmjs.com 上把本 workflow 配为
+      # Trusted Publisher（首次发布需先手动 npm publish 创建包）。
       - name: 发布 npm
         if: steps.version.outputs.publish == 'true'
+        # OIDC 发布会自动生成 provenance；这里显式声明以表明意图。
         run: npm publish --provenance
       - name: 创建发布记录
         if: steps.version.outputs.release == 'true'
