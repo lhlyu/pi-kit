@@ -6,6 +6,7 @@ import {
     renderStatus,
     RoundStats,
     tpsColor,
+    ttftColor,
 } from '../src/status.ts'
 
 test('耗时格式化为秒或分钟加秒', () => {
@@ -98,23 +99,36 @@ test('使用默认 emoji 图标，且一个不换行空格不被 Pi 页脚压缩
     )
 })
 
-test('TPS 使用一秒窗口，停顿时归零，短窗口不会产生无限速度', () => {
+test('TPS 使用一秒窗口，采样不足时显示占位值，停顿时归零', () => {
     const stats = new RoundStats()
     stats.start(0)
     stats.recordDelta(1_000)
-    assert.equal(stats.snapshot(1_000).tps, 10)
+    assert.equal(stats.snapshot(1_000).tps, undefined)
 
     stats.recordDelta(1_500)
-    assert.equal(stats.snapshot(1_500).tps, 4)
+    assert.equal(stats.snapshot(1_500).tps, undefined)
+    assert.equal(stats.snapshot(1_999).tps, undefined)
     assert.equal(stats.snapshot(2_000).tps, 1)
     assert.equal(stats.snapshot(2_500).tps, 0)
 
-    // 长时间停顿后到来一个片段，不将整段时间压缩到 100ms。
+    // 长时间停顿后到来一个片段，仍使用完整的一秒窗口。
     stats.recordDelta(10_000)
     assert.equal(stats.snapshot(10_000).tps, 1)
 })
 
-test('最终 TPS 按每条消息的 usage 校准，耗时包含等待和工具执行', () => {
+test('批量到达的 delta 在采样不足时不显示尖峰，最终 TPS 包含缓冲等待', () => {
+    const stats = new RoundStats()
+    stats.start(0)
+    stats.prepareMessage(0)
+    for (let i = 0; i < 200; i++) stats.recordDelta(5_000)
+    assert.equal(stats.snapshot(5_000).tps, undefined)
+    assert.equal(stats.snapshot(5_500).tps, undefined)
+    stats.endMessage(1_000, 5_730)
+    stats.finish(6_000)
+    assert.equal(stats.snapshot(6_000).tps, 1_000_000 / 5_730)
+})
+
+test('最终 TPS 按 usage 校准，包含首字等待但排除工具执行', () => {
     const stats = new RoundStats()
     stats.start(0)
     stats.prepareMessage(0)
@@ -122,14 +136,14 @@ test('最终 TPS 按每条消息的 usage 校准，耗时包含等待和工具�
     stats.recordDelta(1_900)
     stats.endMessage(50, 3_000)
 
-    // 工具执行后再次生成：共 100 tokens / 4 秒生成时间。
+    // 工具执行后再次调用：共 100 tokens / 6 秒调用时间，排除工具和收尾等待。
     stats.prepareMessage(9_000)
     stats.recordDelta(10_000)
     stats.endMessage(50, 12_000)
     stats.finish(13_000)
 
     assert.deepEqual(stats.snapshot(30_000), {
-        tps: 25,
+        tps: 100 / 6,
         elapsedMs: 13_000,
         ttft: { elapsedMs: 1000, waiting: false },
     })
@@ -147,7 +161,7 @@ test('无 usage 时保留片段估算，中断和重复结束不会重复累计'
     stats.recordDelta(7_000)
 
     assert.deepEqual(stats.snapshot(9_000), {
-        tps: 2,
+        tps: 2 / 1.1,
         elapsedMs: 1_100,
         ttft: { elapsedMs: 100, waiting: false },
     })
@@ -169,7 +183,7 @@ test('新一轮重置统计，没有输出时不沿用上一轮速度', () => {
     })
 })
 
-test('首个 delta 开始计时，重复准备消息和后续 delta 不重置生成起点', () => {
+test('平均 TPS 从调用开始计时，重复准备消息和后续 delta 不重置起点', () => {
     const stats = new RoundStats()
     stats.start(0)
     stats.prepareMessage(1_000)
@@ -185,7 +199,7 @@ test('首个 delta 开始计时，重复准备消息和后续 delta 不重置生
     stats.finish(8_000)
 
     assert.deepEqual(stats.snapshot(10_000), {
-        tps: 25,
+        tps: 50 / 6,
         elapsedMs: 8_000,
         ttft: { elapsedMs: 4000, waiting: false },
     })
@@ -200,13 +214,13 @@ test('后续模型调用等待首字时沿用已完成平均速度，不闪回�
 
     stats.prepareMessage(3_000)
     assert.deepEqual(stats.snapshot(5_000), {
-        tps: 25,
+        tps: 50_000 / 2_100,
         elapsedMs: 5_000,
         ttft: { elapsedMs: 2000, waiting: true },
     })
 })
 
-test('最终平均 TPS 使用实际生成耗时，不套用实时窗口的 100ms 下限', () => {
+test('最终平均 TPS 包含首字等待，不受实时窗口最小采样限制', () => {
     const stats = new RoundStats()
     stats.start(0)
     stats.prepareMessage(0)
@@ -215,7 +229,7 @@ test('最终平均 TPS 使用实际生成耗时，不套用实时窗口的 100ms
     stats.finish(200)
 
     assert.deepEqual(stats.snapshot(300), {
-        tps: 500,
+        tps: 10_000 / 120,
         elapsedMs: 200,
         ttft: { elapsedMs: 100, waiting: false },
     })
@@ -232,7 +246,7 @@ test('空的失败消息不会拉低下一次成功生成的平均 TPS', () => {
     stats.finish(14_000)
 
     assert.deepEqual(stats.snapshot(20_000), {
-        tps: 25,
+        tps: 20,
         elapsedMs: 14_000,
         ttft: { elapsedMs: 500, waiting: false },
     })
@@ -335,13 +349,48 @@ test('TTFT 等待时递增，首 token 后冻结，工具期间保留，下次�
     assert.equal(stats.snapshot(30_000).ttft, undefined)
 })
 
-test('TTFT 显示两位小数、等待省略号，并对异常值降级', () => {
+test('TTFT 五色边界固定，等待时不显示耗时', () => {
+    for (const [elapsedMs, color, rgb] of [
+        [0, 'cyan', [6, 182, 212]],
+        [1_999, 'cyan', [6, 182, 212]],
+        [2_000, 'green', [34, 197, 94]],
+        [4_999, 'green', [34, 197, 94]],
+        [5_000, 'orange', [249, 115, 22]],
+        [7_999, 'orange', [249, 115, 22]],
+        [8_000, 'pink', [236, 72, 153]],
+        [10_999, 'pink', [236, 72, 153]],
+        [11_000, 'red', [239, 68, 68]],
+    ] as const) {
+        assert.equal(ttftColor(elapsedMs), color)
+        for (const waiting of [true, false]) {
+            const text = `${(elapsedMs / 1_000).toFixed(2)}s`
+            let actualColor: unknown
+            renderStatus(
+                { tps: undefined, elapsedMs: 0, ttft: { elapsedMs, waiting } },
+                {
+                    fg: (_color, value) => value,
+                    style: (value, options) => {
+                        if (value === text) actualColor = options.fg
+                        return value
+                    },
+                },
+            )
+            const [r, g, b] = rgb
+            assert.deepEqual(
+                actualColor,
+                waiting ? undefined : { kind: 'rgb', r, g, b },
+            )
+        }
+    }
+})
+
+test('TTFT 显示两位小数，等待和异常值显示占位值', () => {
     const theme = {
         fg: (_color: string, text: string) => text,
         style: (text: string) => text,
     }
     for (const [elapsedMs, waiting, expected] of [
-        [1_230, true, '1.23s…'],
+        [1_230, true, '--'],
         [1_230, false, '1.23s'],
         [0, false, '0.00s'],
         [NaN, true, '--'],

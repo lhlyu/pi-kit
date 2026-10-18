@@ -1,7 +1,6 @@
 import type { ExtensionContext } from '@earendil-works/pi-coding-agent'
 
 const WINDOW_MS = 1_000
-const MIN_SAMPLE_MS = 100
 
 const COLORS = {
     cyan: { kind: 'rgb', r: 6, g: 182, b: 212 },
@@ -17,7 +16,7 @@ export interface RoundSnapshot {
     ttft?: { elapsedMs: number; waiting: boolean }
 }
 
-/** 一轮包含多次模型生成和工具执行；TPS 仅使用模型生成耗时。 */
+/** 一轮包含多次模型调用和工具执行；平均 TPS 包含首字等待，排除工具耗时。 */
 export class RoundStats {
     private startedAt: number | undefined
     private endedAt: number | undefined
@@ -81,13 +80,8 @@ export class RoundStats {
                 : this.message.chunks
         if (tokens > 0) {
             this.outputTokens += tokens
-            // 无内容事件时，使用消息起止时间兜底；空失败消息不计入生成耗时。
-            this.generationMs += Math.max(
-                0,
-                now -
-                    (this.message.generationStartedAt ??
-                        this.message.startedAt),
-            )
+            // 从调用开始计时，包含首字等待；空失败消息不计入。
+            this.generationMs += Math.max(0, now - this.message.startedAt)
         }
         this.message = undefined
     }
@@ -115,11 +109,11 @@ export class RoundStats {
             message.samples = message.samples.filter(
                 (time) => time > now - WINDOW_MS,
             )
-            const span = Math.max(
-                MIN_SAMPLE_MS,
-                Math.min(WINDOW_MS, now - message.generationStartedAt),
-            )
-            tps = (message.samples.length * 1_000) / span
+            // 完整采样一秒后才显示估算值，避免短窗口放大批量到达的 delta。
+            tps =
+                now - message.generationStartedAt >= WINDOW_MS
+                    ? (message.samples.length * 1_000) / WINDOW_MS
+                    : undefined
         }
         const ttft =
             this.ttftMs !== undefined
@@ -147,6 +141,15 @@ export function tpsColor(tps: number): keyof typeof COLORS {
     if (tps >= 40) return 'green'
     if (tps >= 30) return 'orange'
     if (tps >= 15) return 'pink'
+    return 'red'
+}
+
+/** TTFT：<2s cyan，<5s green，<8s orange，<11s pink，其余 red。 */
+export function ttftColor(ms: number): keyof typeof COLORS {
+    if (ms < 2_000) return 'cyan'
+    if (ms < 5_000) return 'green'
+    if (ms < 8_000) return 'orange'
+    if (ms < 11_000) return 'pink'
     return 'red'
 }
 
@@ -184,11 +187,13 @@ export function renderStatus(
 
     const latency = snapshot.ttft
     const ttft =
-        latency && Number.isFinite(latency.elapsedMs) && latency.elapsedMs >= 0
-            ? theme.fg(
-                  'accent',
-                  `${(latency.elapsedMs / 1_000).toFixed(2)}s${latency.waiting ? '…' : ''}`,
-              )
+        latency &&
+        !latency.waiting &&
+        Number.isFinite(latency.elapsedMs) &&
+        latency.elapsedMs >= 0
+            ? theme.style(`${(latency.elapsedMs / 1_000).toFixed(2)}s`, {
+                  fg: COLORS[ttftColor(latency.elapsedMs)],
+              })
             : theme.fg('dim', '--')
 
     // 沙漏默认按 emoji 呈现，避免依赖秒表的变体选择符。

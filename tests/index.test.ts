@@ -196,9 +196,9 @@ test('TTFT 完整事件链：等待、首字冻结、工具保留、下次调用
     const h = harness(t)
     h.emit('agent_start')
     h.emit('turn_start')
-    assert.match(h.updates.at(-1) ?? '', /TTFT: 0\.00s…/)
+    assert.match(h.updates.at(-1) ?? '', /TTFT: -- ⏳/)
     h.tick(1_000)
-    assert.match(h.updates.at(-1) ?? '', /TTFT: 1\.00s…/)
+    assert.match(h.updates.at(-1) ?? '', /TTFT: -- ⏳/)
     h.tick(230)
     h.emit('message_update', {
         assistantMessageEvent: { type: 'thinking_delta', delta: 'x' },
@@ -211,9 +211,9 @@ test('TTFT 完整事件链：等待、首字冻结、工具保留、下次调用
     h.tick(5_000)
     assert.match(h.updates.at(-1) ?? '', /TTFT: 1\.23s ⏳/)
     h.emit('turn_start')
-    assert.match(h.updates.at(-1) ?? '', /TTFT: 0\.00s…/)
+    assert.match(h.updates.at(-1) ?? '', /TTFT: -- ⏳/)
     h.tick(1_000)
-    assert.match(h.updates.at(-1) ?? '', /TTFT: 1\.00s…/)
+    assert.match(h.updates.at(-1) ?? '', /TTFT: -- ⏳/)
     h.emit('agent_settled', { aborted: true })
     assert.match(h.updates.at(-1) ?? '', /TTFT: -- ⏳/)
 })
@@ -277,7 +277,7 @@ for (const mode of ['rpc', 'json', 'print'] as const) {
 }
 
 for (const type of ['text', 'thinking', 'toolcall']) {
-    test(`${type}_start 和空 delta 不提前开始生成计时`, (t) => {
+    test(`${type}_start 和空 delta 不提前结束首字等待`, (t) => {
         const h = harness(t)
         h.emit('agent_start')
         h.emit('turn_start')
@@ -303,7 +303,7 @@ for (const type of ['text', 'thinking', 'toolcall']) {
         h.emit('agent_settled')
         assert.equal(
             h.updates.at(-1),
-            '⚡\u00a0TPS: 25.0 tok/s 🚀\u00a0TTFT: 5.00s ⏳\u00a0TS: 7s',
+            '⚡\u00a0TPS: 7.1 tok/s 🚀\u00a0TTFT: 5.00s ⏳\u00a0TS: 7s',
         )
     })
 }
@@ -509,7 +509,7 @@ test('33ms 内合并 delta，最后一个 delta 无需后续事件也会刷新',
     assert.equal(h.updates.length, count)
     h.tick(1)
     assert.equal(h.updates.length, count + 1)
-    assert.match(h.updates.at(-1) ?? '', /TPS: 30\.0 tok\/s/)
+    assert.match(h.updates.at(-1) ?? '', /TPS: -- tok\/s/)
     h.tick(100)
     assert.equal(h.updates.length, count + 1)
     h.emit('agent_settled')
