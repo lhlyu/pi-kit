@@ -5,7 +5,7 @@ import type {
     ExtensionAPI,
     ExtensionContext,
 } from '@earendil-works/pi-coding-agent'
-import piKit from '../src/index.ts'
+import piKit from '../src/status-extension.ts'
 
 function harness(t: TestContext, mode: ExtensionContext['mode'] = 'tui') {
     const handlers = new Map<
