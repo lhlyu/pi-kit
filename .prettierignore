@@ -1,0 +1,11 @@
+node_modules/
+/examples/
+package-lock.json
+dist/
+build/
+coverage/
+.cache/
+.pi/
+.env
+.env.*
+*.tgz

@@ -1,0 +1,66 @@
+name: 自动发布
+
+on:
+  push:
+    branches: [main]
+    paths: [package.json]
+
+permissions:
+  contents: write
+  id-token: write
+
+concurrency:
+  group: npm-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: 发布
+    runs-on: ubuntu-latest
+    steps:
+      - name: 拉取代码
+        uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - name: 配置 Node
+        uses: actions/setup-node@v7.1.0
+        with:
+          node-version: '24'
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - name: 检查版本
+        id: version
+        run: node --experimental-strip-types scripts/verify-release.ts
+      - name: 校验发布标签
+        if: steps.version.outputs.release == 'true'
+        run: node --experimental-strip-types scripts/verify-release-tag.ts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+      - name: 更新 npm
+        if: steps.version.outputs.publish == 'true'
+        run: npm install --global npm@11 --ignore-scripts
+      - name: 安装依赖
+        if: steps.version.outputs.publish == 'true'
+        run: npm ci --ignore-scripts
+      # prepack 自动执行 npm run check，通过后才会上传 TypeScript 源码。
+      - name: 发布 npm
+        if: steps.version.outputs.publish == 'true'
+        run: npm publish --provenance
+        env:
+          # 仅首次创建 npm 包时需要；配置 Trusted Publisher 后删除此 secret。
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: 创建发布记录
+        if: steps.version.outputs.release == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          node --experimental-strip-types scripts/verify-release-tag.ts
+          tag="v$VERSION"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $tag already exists"
+          else
+            gh release create "$tag" --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" --title "$tag" --generate-notes
+          fi
