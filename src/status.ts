@@ -14,12 +14,14 @@ const COLORS = {
 export interface RoundSnapshot {
     tps: number | undefined
     elapsedMs: number
+    ttft?: { elapsedMs: number; waiting: boolean }
 }
 
 /** 一轮包含多次模型生成和工具执行；TPS 仅使用模型生成耗时。 */
 export class RoundStats {
     private startedAt: number | undefined
     private endedAt: number | undefined
+    private ttftMs: number | undefined
     private outputTokens = 0
     private generationMs = 0
     private message:
@@ -38,6 +40,7 @@ export class RoundStats {
     start(now: number): void {
         this.startedAt = now
         this.endedAt = undefined
+        this.ttftMs = undefined
         this.outputTokens = 0
         this.generationMs = 0
         this.message = undefined
@@ -45,6 +48,7 @@ export class RoundStats {
 
     prepareMessage(now: number): void {
         if (!this.isRunning || this.message) return
+        this.ttftMs = undefined
         this.message = {
             startedAt: now,
             generationStartedAt: undefined,
@@ -58,7 +62,10 @@ export class RoundStats {
         if (!this.message) return
 
         // 首个非空 delta 才开始生成计时；流式阶段每个 delta 暂计一个 token。
-        this.message.generationStartedAt ??= now
+        if (this.message.generationStartedAt === undefined) {
+            this.message.generationStartedAt = now
+            this.ttftMs = Math.max(0, now - this.message.startedAt)
+        }
         this.message.chunks++
         this.message.samples.push(now)
     }
@@ -114,7 +121,16 @@ export class RoundStats {
             )
             tps = (message.samples.length * 1_000) / span
         }
-        return { tps, elapsedMs }
+        const ttft =
+            this.ttftMs !== undefined
+                ? { elapsedMs: this.ttftMs, waiting: false }
+                : message
+                  ? {
+                        elapsedMs: Math.max(0, now - message.startedAt),
+                        waiting: true,
+                    }
+                  : undefined
+        return { tps, elapsedMs, ...(ttft ? { ttft } : {}) }
     }
 }
 
@@ -166,7 +182,16 @@ export function renderStatus(
         fg: COLORS[durationColor(elapsedMs)],
     })
 
+    const latency = snapshot.ttft
+    const ttft =
+        latency && Number.isFinite(latency.elapsedMs) && latency.elapsedMs >= 0
+            ? theme.fg(
+                  'accent',
+                  `${(latency.elapsedMs / 1_000).toFixed(2)}s${latency.waiting ? '…' : ''}`,
+              )
+            : theme.fg('dim', '--')
+
     // 沙漏默认按 emoji 呈现，避免依赖秒表的变体选择符。
     // Pi 页脚会合并普通空格，用一个不换行空格保留图标后的间距。
-    return `${theme.fg('dim', '⚡\u00a0TPS:')} ${tps} ${theme.fg('dim', '⏳\u00a0TS:')} ${duration}`
+    return `${theme.fg('dim', '⚡\u00a0TPS:')} ${tps} ${theme.fg('dim', '🚀\u00a0TTFT:')} ${ttft} ${theme.fg('dim', '⏳\u00a0TS:')} ${duration}`
 }

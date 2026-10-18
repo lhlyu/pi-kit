@@ -113,7 +113,9 @@ export default function piKit(pi: ExtensionAPI): void {
         'turn_start',
         safely((_event, ctx) => {
             // 无流式内容时，message_start 可能直到请求完成才派发。
-            if (isActive(ctx)) stats.prepareMessage(performance.now())
+            if (!isActive(ctx)) return
+            stats.prepareMessage(performance.now())
+            render(ctx, true)
         }),
     )
 

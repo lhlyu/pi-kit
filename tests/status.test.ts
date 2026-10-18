@@ -67,7 +67,10 @@ test('显示格式及数值颜色符合约定', () => {
         },
     )
 
-    assert.equal(text, '⚡\u00a0TPS: 50.0 tok/s ⏳\u00a0TS: 2m35s')
+    assert.equal(
+        text,
+        '⚡\u00a0TPS: 50.0 tok/s 🚀\u00a0TTFT: -- ⏳\u00a0TS: 2m35s',
+    )
     assert.deepEqual(colors, [
         { kind: 'rgb', r: 34, g: 197, b: 94 },
         { kind: 'rgb', r: 249, g: 115, b: 22 },
@@ -89,7 +92,10 @@ test('使用默认 emoji 图标，且一个不换行空格不被 Pi 页脚压缩
         .replace(/ +/g, ' ')
         .trim()
 
-    assert.equal(footerText, '⚡\u00a0TPS: 197.2 tok/s ⏳\u00a0TS: 40s')
+    assert.equal(
+        footerText,
+        '⚡\u00a0TPS: 197.2 tok/s 🚀\u00a0TTFT: -- ⏳\u00a0TS: 40s',
+    )
 })
 
 test('TPS 使用一秒窗口，停顿时归零，短窗口不会产生无限速度', () => {
@@ -122,7 +128,11 @@ test('最终 TPS 按每条消息的 usage 校准，耗时包含等待和工具�
     stats.endMessage(50, 12_000)
     stats.finish(13_000)
 
-    assert.deepEqual(stats.snapshot(30_000), { tps: 25, elapsedMs: 13_000 })
+    assert.deepEqual(stats.snapshot(30_000), {
+        tps: 25,
+        elapsedMs: 13_000,
+        ttft: { elapsedMs: 1000, waiting: false },
+    })
 })
 
 test('无 usage 时保留片段估算，中断和重复结束不会重复累计', () => {
@@ -136,7 +146,11 @@ test('无 usage 时保留片段估算，中断和重复结束不会重复累计'
     stats.endMessage(999, 6_000)
     stats.recordDelta(7_000)
 
-    assert.deepEqual(stats.snapshot(9_000), { tps: 2, elapsedMs: 1_100 })
+    assert.deepEqual(stats.snapshot(9_000), {
+        tps: 2,
+        elapsedMs: 1_100,
+        ttft: { elapsedMs: 100, waiting: false },
+    })
 })
 
 test('新一轮重置统计，没有输出时不沿用上一轮速度', () => {
@@ -162,6 +176,7 @@ test('首个 delta 开始计时，重复准备消息和后续 delta 不重置生
     assert.deepEqual(stats.snapshot(4_000), {
         tps: undefined,
         elapsedMs: 4_000,
+        ttft: { elapsedMs: 3_000, waiting: true },
     })
     stats.recordDelta(5_000)
     stats.prepareMessage(6_000)
@@ -169,7 +184,11 @@ test('首个 delta 开始计时，重复准备消息和后续 delta 不重置生
     stats.endMessage(50, 7_000)
     stats.finish(8_000)
 
-    assert.deepEqual(stats.snapshot(10_000), { tps: 25, elapsedMs: 8_000 })
+    assert.deepEqual(stats.snapshot(10_000), {
+        tps: 25,
+        elapsedMs: 8_000,
+        ttft: { elapsedMs: 4000, waiting: false },
+    })
 })
 
 test('后续模型调用等待首字时沿用已完成平均速度，不闪回占位符', () => {
@@ -180,7 +199,11 @@ test('后续模型调用等待首字时沿用已完成平均速度，不闪回�
     stats.endMessage(50, 2_100)
 
     stats.prepareMessage(3_000)
-    assert.deepEqual(stats.snapshot(5_000), { tps: 25, elapsedMs: 5_000 })
+    assert.deepEqual(stats.snapshot(5_000), {
+        tps: 25,
+        elapsedMs: 5_000,
+        ttft: { elapsedMs: 2000, waiting: true },
+    })
 })
 
 test('最终平均 TPS 使用实际生成耗时，不套用实时窗口的 100ms 下限', () => {
@@ -191,7 +214,11 @@ test('最终平均 TPS 使用实际生成耗时，不套用实时窗口的 100ms
     stats.endMessage(10, 120)
     stats.finish(200)
 
-    assert.deepEqual(stats.snapshot(300), { tps: 500, elapsedMs: 200 })
+    assert.deepEqual(stats.snapshot(300), {
+        tps: 500,
+        elapsedMs: 200,
+        ttft: { elapsedMs: 100, waiting: false },
+    })
 })
 
 test('空的失败消息不会拉低下一次成功生成的平均 TPS', () => {
@@ -204,7 +231,11 @@ test('空的失败消息不会拉低下一次成功生成的平均 TPS', () => {
     stats.endMessage(50, 13_000)
     stats.finish(14_000)
 
-    assert.deepEqual(stats.snapshot(20_000), { tps: 25, elapsedMs: 14_000 })
+    assert.deepEqual(stats.snapshot(20_000), {
+        tps: 25,
+        elapsedMs: 14_000,
+        ttft: { elapsedMs: 500, waiting: false },
+    })
 })
 
 test('无效 usage 不产生 NaN 或 Infinity', () => {
@@ -215,7 +246,11 @@ test('无效 usage 不产生 NaN 或 Infinity', () => {
         stats.endMessage(usage, 0)
         stats.finish(0)
         // 未测得生成耗时，显示占位值，而不是捏造平均值或除以零。
-        assert.deepEqual(stats.snapshot(0), { tps: undefined, elapsedMs: 0 })
+        assert.deepEqual(stats.snapshot(0), {
+            tps: undefined,
+            elapsedMs: 0,
+            ttft: { elapsedMs: 0, waiting: false },
+        })
     }
 })
 
@@ -227,7 +262,11 @@ test('无效 usage 使用有效片段估算，而不是中断统计', () => {
         stats.recordDelta(500)
         stats.endMessage(usage, 1_000)
         stats.finish(2_000)
-        assert.deepEqual(stats.snapshot(3_000), { tps: 2, elapsedMs: 2_000 })
+        assert.deepEqual(stats.snapshot(3_000), {
+            tps: 2,
+            elapsedMs: 2_000,
+            ttft: { elapsedMs: 0, waiting: false },
+        })
     }
 })
 
@@ -255,8 +294,69 @@ test('显示层对无效 TPS 和耗时安全降级', () => {
         colors.length = 0
         assert.equal(
             renderStatus({ tps, elapsedMs: NaN }, theme),
-            '⚡\u00a0TPS: -- tok/s ⏳\u00a0TS: 0s',
+            '⚡\u00a0TPS: -- tok/s 🚀\u00a0TTFT: -- ⏳\u00a0TS: 0s',
         )
         assert.deepEqual(colors, [{ kind: 'rgb', r: 6, g: 182, b: 212 }])
+    }
+})
+
+test('TTFT 等待时递增，首 token 后冻结，工具期间保留，下次调用重置', () => {
+    const stats = new RoundStats()
+    assert.equal(stats.snapshot(0).ttft, undefined)
+    stats.start(0)
+    stats.prepareMessage(100)
+    assert.deepEqual(stats.snapshot(600).ttft, {
+        elapsedMs: 500,
+        waiting: true,
+    })
+    stats.prepareMessage(700)
+    stats.recordDelta(1_330)
+    stats.recordDelta(2_000)
+    assert.deepEqual(stats.snapshot(3_000).ttft, {
+        elapsedMs: 1_230,
+        waiting: false,
+    })
+    stats.endMessage(50, 3_000)
+    assert.deepEqual(stats.snapshot(9_000).ttft, {
+        elapsedMs: 1_230,
+        waiting: false,
+    })
+    stats.prepareMessage(10_000)
+    assert.deepEqual(stats.snapshot(10_500).ttft, {
+        elapsedMs: 500,
+        waiting: true,
+    })
+    stats.endMessage(0, 11_000)
+    assert.equal(stats.snapshot(11_000).ttft, undefined)
+    stats.prepareMessage(12_000)
+    stats.finish(13_000)
+    assert.equal(stats.snapshot(20_000).ttft, undefined)
+    stats.start(30_000)
+    assert.equal(stats.snapshot(30_000).ttft, undefined)
+})
+
+test('TTFT 显示两位小数、等待省略号，并对异常值降级', () => {
+    const theme = {
+        fg: (_color: string, text: string) => text,
+        style: (text: string) => text,
+    }
+    for (const [elapsedMs, waiting, expected] of [
+        [1_230, true, '1.23s…'],
+        [1_230, false, '1.23s'],
+        [0, false, '0.00s'],
+        [NaN, true, '--'],
+        [Infinity, false, '--'],
+        [-1, false, '--'],
+    ] as const) {
+        assert.ok(
+            renderStatus(
+                {
+                    tps: undefined,
+                    elapsedMs: 0,
+                    ttft: { elapsedMs, waiting },
+                },
+                theme,
+            ).includes(`TTFT: ${expected} ⏳`),
+        )
     }
 })
