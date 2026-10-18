@@ -44,12 +44,11 @@ jobs:
         if: steps.version.outputs.publish == 'true'
         run: npm ci --ignore-scripts
       # prepack 自动执行 npm run check，通过后才会上传 TypeScript 源码。
+      # 认证走 Trusted Publishing（OIDC）：需要 id-token: write、npm >= 11.5.1，
+      # 且包已存在并在 npmjs.com 配好本 workflow 为 Trusted Publisher。
       - name: 发布 npm
         if: steps.version.outputs.publish == 'true'
         run: npm publish --provenance
-        env:
-          # 仅首次创建 npm 包时需要；配置 Trusted Publisher 后删除此 secret。
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
       - name: 创建发布记录
         if: steps.version.outputs.release == 'true'
         env:
