@@ -207,7 +207,6 @@ async function writeCache(
             version: 1,
             fingerprint,
             ids,
-            updatedAt: new Date().toISOString(),
         }),
         { mode: 0o600 },
     )
@@ -241,14 +240,8 @@ export async function discoverProviders(
     // 隔离的原生认证 Runtime：不联网加载内置目录、不重读整份模型配置。
     // 逐 Provider 注册静态认证配置，使一个坏配置不会影响其他 Provider 的发现。
     const authPath = join(options.agentDir, 'auth.json')
-    const authRuntime = await ModelRuntime.create({
-        modelsPath: null,
-        refreshOnCreate: false,
-        // 原生文件 Store 的读操作会创建空 auth.json；不存在时用官方内存 Store。
-        ...(existsSync(authPath)
-            ? { authPath }
-            : { credentials: new InMemoryCredentialStore() }),
-    })
+    // 在单 Provider 的容错边界内按需初始化，失败时仍可使用缓存。
+    let authRuntime: Promise<ModelRuntime> | undefined
     const reserved = new Set<string>(builtinProviderIds)
     const cacheDir = join(options.agentDir, 'pi-kit', 'cache', 'providers')
     await Promise.allSettled(
@@ -281,8 +274,16 @@ export async function discoverProviders(
                     const signal = AbortSignal.timeout(
                         options.timeoutMs ?? 5_000,
                     )
-                    authRuntime.registerProvider(name, registration)
-                    const auth = await authRuntime.getAuth(name, { signal })
+                    const runtime = await (authRuntime ??= ModelRuntime.create({
+                        modelsPath: null,
+                        refreshOnCreate: false,
+                        // 原生文件 Store 的读操作会创建空 auth.json；不存在时使用内存 Store。
+                        ...(existsSync(authPath)
+                            ? { authPath }
+                            : { credentials: new InMemoryCredentialStore() }),
+                    }))
+                    runtime.registerProvider(name, registration)
+                    const auth = await runtime.getAuth(name, { signal })
                     if (!auth) throw new Error('原生认证不可用')
                     ids = await fetchModels(
                         modelsUrl,

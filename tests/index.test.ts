@@ -115,7 +115,7 @@ test('等待首字时持续计时，结束后强制更新且停止计时器', (t
     assert.equal(h.updates.length, count)
 })
 
-test('工具后的调用无流式 usage 时始终保留上次 TPS', (t) => {
+test('工具后的调用等待时保留上次 TPS，首个 delta 就能实时估算', (t) => {
     const h = harness(t)
     const delta = {
         assistantMessageEvent: { type: 'text_delta', delta: 'x' },
@@ -135,16 +135,17 @@ test('工具后的调用无流式 usage 时始终保留上次 TPS', (t) => {
     assert.match(h.updates.at(-1) ?? '', /TPS: 25\.0 tok\/s/)
     h.emit('message_update', delta)
     h.tick(33)
-    assert.match(h.updates.at(-1) ?? '', /TPS: 25\.0 tok\/s/)
+    assert.match(h.updates.at(-1) ?? '', /TPS: 10\.0 tok\/s/)
     h.tick(467)
     h.emit('message_update', delta)
-    assert.match(h.updates.at(-1) ?? '', /TPS: 25\.0 tok\/s/)
+    assert.match(h.updates.at(-1) ?? '', /TPS: 4\.0 tok\/s/)
     h.tick(500)
-    assert.match(h.updates.at(-1) ?? '', /TPS: 25\.0 tok\/s/)
+    assert.match(h.updates.at(-1) ?? '', /TPS: 2\.0 tok\/s/)
     h.emit('agent_settled')
+    assert.match(h.updates.at(-1) ?? '', /TPS: 25\.0 tok\/s/)
 })
 
-test('文本、思考和工具参数的 delta 不作为 token 估算，工具结果不计入', (t) => {
+test('文本、思考和工具参数都参与实时估算，工具结果和空 delta 不计入', (t) => {
     const h = harness(t)
     h.emit('agent_start')
     for (const type of ['text_delta', 'thinking_delta', 'toolcall_delta']) {
@@ -152,12 +153,16 @@ test('文本、思考和工具参数的 delta 不作为 token 估算，工具结
             assistantMessageEvent: { type, delta: 'x' },
         })
     }
+    h.tick(33)
+    assert.match(h.updates.at(-1) ?? '', /TPS: 30\.0 tok\/s/)
+    const count = h.updates.length
     h.emit('message_update', {
         assistantMessageEvent: { type: 'text_delta', delta: '' },
     })
     h.emit('message_end', {
         message: { role: 'toolResult', usage: { output: 999 } },
     })
+    assert.equal(h.updates.length, count)
     h.tick(1_000)
     h.emit('message_end', {
         message: { role: 'assistant', usage: { output: 0 } },
@@ -187,7 +192,7 @@ test('流式 usage 按 token 增量统计，结束后使用单次平均值，缺
     update(40)
     update(NaN)
     h.tick(500)
-    assert.match(h.updates.at(-1) ?? '', /TPS: 30\.0 tok\/s/)
+    assert.match(h.updates.at(-1) ?? '', /TPS: 40\.0 tok\/s/)
     h.emit('message_end', {
         message: { role: 'assistant', usage: { output: 50 } },
     })
@@ -196,7 +201,7 @@ test('流式 usage 按 token 增量统计，结束后使用单次平均值，缺
     h.emit('turn_start')
     update(undefined)
     h.tick(2_000)
-    assert.match(h.updates.at(-1) ?? '', /TPS: 50\.0 tok\/s/)
+    assert.match(h.updates.at(-1) ?? '', /TPS: 0\.0 tok\/s/)
     h.emit('message_end', { message: { role: 'assistant' } })
     h.emit('agent_settled')
     assert.match(h.updates.at(-1) ?? '', /TPS: 50\.0 tok\/s/)
@@ -214,7 +219,7 @@ test('首个 delta 的 usage 不丢失，空 delta 和非 delta 更新也能刷�
         },
     })
     h.tick(1_000)
-    assert.match(h.updates.at(-1) ?? '', /TPS: 0\.0 tok\/s/)
+    assert.match(h.updates.at(-1) ?? '', /TPS: 1\.0 tok\/s/)
     h.tick(100)
     h.emit('message_update', {
         assistantMessageEvent: {
@@ -224,7 +229,7 @@ test('首个 delta 的 usage 不丢失，空 delta 和非 delta 更新也能刷�
         },
     })
     h.tick(33)
-    assert.match(h.updates.at(-1) ?? '', /TPS: 30\.0 tok\/s/)
+    assert.match(h.updates.at(-1) ?? '', /TPS: 26\.5 tok\/s/)
     h.tick(100)
     h.emit('message_update', {
         assistantMessageEvent: {
@@ -232,10 +237,39 @@ test('首个 delta 的 usage 不丢失，空 delta 和非 delta 更新也能刷�
             partial: { usage: { output: 60 } },
         },
     })
-    assert.match(h.updates.at(-1) ?? '', /TPS: 50\.0 tok\/s/)
+    assert.match(h.updates.at(-1) ?? '', /TPS: 375\.9 tok\/s/)
     h.emit('agent_settled')
     // 无最终 usage 时，不把实时值当成已完成调用的平均值。
     assert.match(h.updates.at(-1) ?? '', /TPS: -- tok\/s/)
+})
+
+test('只有首部占位 usage 和最终 usage 的接口也能实时更新估算', (t) => {
+    const h = harness(t)
+    h.emit('agent_start')
+    h.emit('turn_start')
+    const update = (type: string, delta: string) =>
+        h.emit('message_update', {
+            assistantMessageEvent: {
+                type,
+                delta,
+                partial: { usage: { output: 1 } },
+            },
+        })
+    update('text_delta', 'hello')
+    h.tick(500)
+    update('thinking_delta', 'word '.repeat(20))
+    h.tick(500)
+    assert.match(h.updates.at(-1) ?? '', /TPS: 21\.0 tok\/s/)
+    h.tick(100)
+    update('toolcall_delta', 'word '.repeat(20))
+    h.tick(33)
+    assert.match(h.updates.at(-1) ?? '', /TPS: 63\.2 tok\/s/)
+    h.emit('message_end', {
+        message: { role: 'assistant', usage: { output: 100 } },
+    })
+    assert.doesNotMatch(h.updates.at(-1) ?? '', /≈/)
+    assert.match(h.updates.at(-1) ?? '', /TPS: 88\.3 tok\/s/)
+    h.emit('agent_settled')
 })
 
 test('会话关闭和重复关闭均可安全清理，后续会话不残留统计', (t) => {
@@ -459,6 +493,12 @@ test('缺失或异常事件字段被忽略，不抛异常也不污染有效统�
         assert.doesNotThrow(() => h.emit('message_update', event))
         assert.doesNotThrow(() => h.emit('message_end', event))
     }
+    for (const assistantMessageEvent of [null, false, 1, 'invalid']) {
+        h.emit('message_update', { assistantMessageEvent })
+    }
+    const beforeTick = h.updates.length
+    h.tick(1_000)
+    assert.equal(h.updates.length, beforeTick + 1)
     for (const delta of [undefined, null, 123, {}, '']) {
         assert.doesNotThrow(() =>
             h.emit('message_update', {
@@ -474,7 +514,7 @@ test('缺失或异常事件字段被忽略，不抛异常也不污染有效统�
     h.emit('agent_settled')
     assert.equal(
         h.updates.at(-1),
-        '⚡\u00a0TPS: -- tok/s 🚀\u00a0TTFT: 0.00s ⏳\u00a0TS: 1s',
+        '⚡\u00a0TPS: -- tok/s 🚀\u00a0TTFT: 1.00s ⏳\u00a0TS: 2s',
     )
 })
 
@@ -624,7 +664,7 @@ test('33ms 内合并 delta，最后一个 delta 无需后续事件也会刷新',
     assert.equal(h.updates.length, count)
     h.tick(1)
     assert.equal(h.updates.length, count + 1)
-    assert.match(h.updates.at(-1) ?? '', /TPS: -- tok\/s/)
+    assert.match(h.updates.at(-1) ?? '', /TPS: 30\.0 tok\/s/)
     h.tick(100)
     assert.equal(h.updates.length, count + 1)
     h.emit('agent_settled')

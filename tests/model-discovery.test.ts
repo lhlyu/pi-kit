@@ -624,6 +624,58 @@ test('环境变量缺失仍保留缓存；当前兼容配置不固化在缓存�
     assert.deepEqual(model.compat, { supportsStore: false })
 })
 
+test('认证 Runtime 初始化失败不会中断加载：各 Provider 独立回退缓存或跳过', async (t) => {
+    const h = await harness(t)
+    await h.config({ relay: provider })
+    await h.load(async () => response(['cached']))
+    await h.config({
+        relay: provider,
+        fresh: { ...provider, baseUrl: 'https://fresh.example/v1' },
+    })
+    const create = t.mock.method(ModelRuntime, 'create', async () => {
+        throw new Error('secret: auth runtime unavailable')
+    })
+    await h.load(async () => assert.fail('初始化失败后不应发起请求'))
+    assert.equal(create.mock.callCount(), 1)
+    assert.equal(h.registrations.get('relay')?.models?.[0]?.id, 'cached')
+    assert.equal(h.registrations.has('fresh'), false)
+    assert.equal(h.warnings.length, 2)
+    assert.ok(
+        h.warnings.some((warning) => warning.includes('使用上次成功缓存')),
+    )
+    assert.ok(h.warnings.some((warning) => warning.includes('无缓存')))
+    assert.ok(h.warnings.every((warning) => !warning.includes('secret')))
+})
+
+test('全部配置无效或使用鉴权命令时，不初始化认证 Runtime', async (t) => {
+    const h = await harness(t)
+    await h.config({
+        invalid: { ...provider, baseUrl: 'not a URL' },
+        openai: provider,
+        command: { ...provider, apiKey: '!echo secret' },
+    })
+    const create = t.mock.method(ModelRuntime, 'create', async () =>
+        assert.fail('无可发现 Provider 时不应初始化认证 Runtime'),
+    )
+    await h.load(async () => assert.fail('不应发起请求'))
+    assert.equal(create.mock.callCount(), 0)
+    assert.equal(h.registrations.size, 0)
+    assert.equal(h.warnings.length, 3)
+})
+
+test('多个 Provider 共用一次延迟创建的认证 Runtime', async (t) => {
+    const h = await harness(t)
+    await h.config({
+        a: provider,
+        b: { ...provider, baseUrl: 'https://b.example/v1' },
+    })
+    const create = t.mock.method(ModelRuntime, 'create')
+    await h.load(async () => response(['chat']))
+    assert.equal(create.mock.callCount(), 1)
+    assert.equal(h.registrations.size, 2)
+    assert.equal(h.warnings.length, 0)
+})
+
 test('没有配置时不请求网络、不创建缓存；缺失或损坏配置安全降级', async (t) => {
     const h = await harness(t)
     let requests = 0

@@ -1,6 +1,5 @@
 import type { ExtensionContext } from '@earendil-works/pi-coding-agent'
-
-const WINDOW_MS = 1_000
+import { estimateTokens, SlidingWindow } from './token-speed-window.ts'
 
 const COLORS = {
     cyan: { kind: 'rgb', r: 6, g: 182, b: 212 },
@@ -16,7 +15,7 @@ export interface RoundSnapshot {
     ttft?: { elapsedMs: number; waiting: boolean }
 }
 
-/** TPS 仅使用服务端 usage；单次调用平均速度包含首字等待，排除工具耗时。 */
+/** 实时 TPS 优先使用 usage，否则估算；完成后的平均速度包含首字等待。 */
 export class RoundStats {
     private startedAt: number | undefined
     private endedAt: number | undefined
@@ -25,10 +24,11 @@ export class RoundStats {
     private message:
         | {
               startedAt: number
-              generationStartedAt: number | undefined
+              hasOutput: boolean
               outputTokens: number
-              usageStartedAt: number | undefined
-              samples: { time: number; tokens: number }[]
+              usageUpdates: number
+              samples: SlidingWindow
+              estimatedSamples: SlidingWindow
           }
         | undefined
 
@@ -49,22 +49,26 @@ export class RoundStats {
         // 保留上次 TTFT，直到本次调用的首个非空 delta 到达。
         this.message = {
             startedAt: now,
-            generationStartedAt: undefined,
+            hasOutput: false,
             outputTokens: 0,
-            usageStartedAt: undefined,
-            samples: [],
+            usageUpdates: 0,
+            samples: new SlidingWindow(),
+            estimatedSamples: new SlidingWindow(),
         }
     }
 
-    recordDelta(now: number): void {
+    recordDelta(now: number, delta: string): boolean {
+        if (delta.length === 0) return false
         this.prepareMessage(now)
-        if (!this.message) return
+        const message = this.message
+        if (!message) return false
 
-        // 非空 delta 仅用于确定首字时间，不能代表 token 数量。
-        if (this.message.generationStartedAt === undefined) {
-            this.message.generationStartedAt = now
-            this.ttftMs = Math.max(0, now - this.message.startedAt)
+        if (!message.hasOutput) {
+            message.hasOutput = true
+            this.ttftMs = Math.max(0, now - message.startedAt)
         }
+        message.estimatedSamples.record(estimateTokens(delta), now)
+        return true
     }
 
     recordUsage(outputTokens: unknown, now: number): boolean {
@@ -77,11 +81,8 @@ export class RoundStats {
         )
             return false
 
-        message.usageStartedAt ??= now
-        message.samples.push({
-            time: now,
-            tokens: outputTokens - message.outputTokens,
-        })
+        message.usageUpdates++
+        message.samples.record(outputTokens - message.outputTokens, now)
         message.outputTokens = outputTokens
         return true
     }
@@ -114,24 +115,13 @@ export class RoundStats {
                 ? 0
                 : Math.max(0, (this.endedAt ?? now) - this.startedAt)
 
-        // 无可靠流式用量或采样不足时，沿用上一条已完成调用的平均速度。
         let tps = this.lastTps
         const message = this.message
-        if (message?.usageStartedAt !== undefined) {
-            // 只在限频后的刷新中清理窗口，不在每个 delta 上复制数组。
-            message.samples = message.samples.filter(
-                ({ time }) => time > now - WINDOW_MS,
-            )
-            // 完整采样一秒后才显示速度；重复的累计用量不重复计数。
-            tps =
-                now - message.usageStartedAt >= WINDOW_MS
-                    ? (message.samples.reduce(
-                          (sum, sample) => sum + sample.tokens,
-                          0,
-                      ) *
-                          1_000) /
-                      WINDOW_MS
-                    : tps
+        // 单次正数可能只是开头的占位 usage，至少增长两次才切换。
+        if (message && message.usageUpdates >= 2) {
+            tps = message.samples.getTps(now)
+        } else if (message?.hasOutput) {
+            tps = message.estimatedSamples.getTps(now)
         }
         const ttft =
             this.ttftMs !== undefined
@@ -142,7 +132,11 @@ export class RoundStats {
                         waiting: true,
                     }
                   : undefined
-        return { tps, elapsedMs, ...(ttft ? { ttft } : {}) }
+        return {
+            tps,
+            elapsedMs,
+            ...(ttft ? { ttft } : {}),
+        }
     }
 }
 
