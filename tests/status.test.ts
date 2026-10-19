@@ -99,21 +99,24 @@ test('使用默认 emoji 图标，且一个不换行空格不被 Pi 页脚压缩
     )
 })
 
-test('TPS 使用一秒窗口，采样不足时显示占位值，停顿时归零', () => {
+test('服务端累计 usage 使用一秒窗口，采样不足时显示占位值，停顿时归零', () => {
     const stats = new RoundStats()
     stats.start(0)
-    stats.recordDelta(1_000)
+    stats.prepareMessage(0)
+    stats.recordUsage(10, 1_000)
     assert.equal(stats.snapshot(1_000).tps, undefined)
 
-    stats.recordDelta(1_500)
+    stats.recordUsage(30, 1_500)
+    stats.recordUsage(30, 1_600)
+    stats.recordUsage(20, 1_700)
     assert.equal(stats.snapshot(1_500).tps, undefined)
     assert.equal(stats.snapshot(1_999).tps, undefined)
-    assert.equal(stats.snapshot(2_000).tps, 1)
+    assert.equal(stats.snapshot(2_000).tps, 20)
     assert.equal(stats.snapshot(2_500).tps, 0)
 
     // 长时间停顿后到来一个片段，仍使用完整的一秒窗口。
-    stats.recordDelta(10_000)
-    assert.equal(stats.snapshot(10_000).tps, 1)
+    stats.recordUsage(35, 10_000)
+    assert.equal(stats.snapshot(10_000).tps, 5)
 })
 
 test('批量到达的 delta 在采样不足时不显示尖峰，最终 TPS 包含缓冲等待', () => {
@@ -128,7 +131,7 @@ test('批量到达的 delta 在采样不足时不显示尖峰，最终 TPS 包�
     assert.equal(stats.snapshot(6_000).tps, 1_000_000 / 5_730)
 })
 
-test('最终 TPS 按 usage 校准，包含首字等待但排除工具执行', () => {
+test('最终 TPS 使用上一条调用的 usage，包含首字等待但排除工具执行', () => {
     const stats = new RoundStats()
     stats.start(0)
     stats.prepareMessage(0)
@@ -136,20 +139,20 @@ test('最终 TPS 按 usage 校准，包含首字等待但排除工具执行', ()
     stats.recordDelta(1_900)
     stats.endMessage(50, 3_000)
 
-    // 工具执行后再次调用：共 100 tokens / 6 秒调用时间，排除工具和收尾等待。
+    // 工具执行后再次调用：仅显示最近一次调用的 60 tokens / 3 秒。
     stats.prepareMessage(9_000)
     stats.recordDelta(10_000)
-    stats.endMessage(50, 12_000)
+    stats.endMessage(60, 12_000)
     stats.finish(13_000)
 
     assert.deepEqual(stats.snapshot(30_000), {
-        tps: 100 / 6,
+        tps: 20,
         elapsedMs: 13_000,
         ttft: { elapsedMs: 1000, waiting: false },
     })
 })
 
-test('无 usage 时保留片段估算，中断和重复结束不会重复累计', () => {
+test('无 usage 时不使用片段估算，中断和重复结束不会污染统计', () => {
     const stats = new RoundStats()
     stats.start(0)
     stats.prepareMessage(0)
@@ -161,7 +164,7 @@ test('无 usage 时保留片段估算，中断和重复结束不会重复累计'
     stats.recordDelta(7_000)
 
     assert.deepEqual(stats.snapshot(9_000), {
-        tps: 2 / 1.1,
+        tps: undefined,
         elapsedMs: 1_100,
         ttft: { elapsedMs: 100, waiting: false },
     })
@@ -223,11 +226,11 @@ test('后续模型调用等待首字和采样不足时沿用已完成平均速�
     assert.equal(stats.snapshot(5_000).tps, 50_000 / 2_100)
     stats.recordDelta(5_500)
     assert.equal(stats.snapshot(5_999).tps, 50_000 / 2_100)
-    assert.equal(stats.snapshot(6_000).tps, 1)
-    assert.equal(stats.snapshot(6_500).tps, 0)
+    assert.equal(stats.snapshot(6_000).tps, 50_000 / 2_100)
+    assert.equal(stats.snapshot(6_500).tps, 50_000 / 2_100)
 })
 
-test('后续短调用和空失败不清除 TPS，下一次采样沿用更新后的累计平均值', () => {
+test('后续调用使用各自平均速度，空失败和缺失 usage 保留上一次结果', () => {
     const stats = new RoundStats()
     stats.start(0)
     stats.prepareMessage(0)
@@ -238,16 +241,18 @@ test('后续短调用和空失败不清除 TPS，下一次采样沿用更新后�
     stats.recordDelta(3_100)
     assert.equal(stats.snapshot(3_200).tps, 25)
     stats.endMessage(10, 3_500)
-    assert.equal(stats.snapshot(3_500).tps, 24)
+    assert.equal(stats.snapshot(3_500).tps, 20)
 
     stats.prepareMessage(4_000)
     stats.endMessage(0, 5_000)
-    assert.equal(stats.snapshot(5_000).tps, 24)
+    assert.equal(stats.snapshot(5_000).tps, 20)
 
     stats.prepareMessage(6_000)
     stats.recordDelta(6_100)
-    assert.equal(stats.snapshot(7_099).tps, 24)
-    assert.equal(stats.snapshot(7_100).tps, 0)
+    assert.equal(stats.snapshot(7_099).tps, 20)
+    assert.equal(stats.snapshot(7_100).tps, 20)
+    stats.endMessage(undefined, 8_000)
+    assert.equal(stats.snapshot(8_000).tps, 20)
 })
 
 test('最终平均 TPS 包含首字等待，不受实时窗口最小采样限制', () => {
@@ -298,7 +303,7 @@ test('无效 usage 不产生 NaN 或 Infinity', () => {
     }
 })
 
-test('无效 usage 使用有效片段估算，而不是中断统计', () => {
+test('无效 usage 不使用片段估算', () => {
     for (const usage of [undefined, null, '10', NaN, Infinity, -1]) {
         const stats = new RoundStats()
         stats.start(0)
@@ -307,7 +312,7 @@ test('无效 usage 使用有效片段估算，而不是中断统计', () => {
         stats.endMessage(usage, 1_000)
         stats.finish(2_000)
         assert.deepEqual(stats.snapshot(3_000), {
-            tps: 2,
+            tps: undefined,
             elapsedMs: 2_000,
             ttft: { elapsedMs: 0, waiting: false },
         })
@@ -317,11 +322,12 @@ test('无效 usage 使用有效片段估算，而不是中断统计', () => {
 test('高频窗口跨越多次清理后仍准确，窗口左边界不计入', () => {
     const stats = new RoundStats()
     stats.start(0)
-    for (let now = 0; now < 10_000; now++) stats.recordDelta(now)
+    stats.prepareMessage(0)
+    for (let now = 0; now < 10_000; now++) stats.recordUsage(now + 1, now)
     assert.equal(stats.snapshot(9_999).tps, 1_000)
     assert.equal(stats.snapshot(10_000).tps, 999)
     assert.equal(stats.snapshot(10_999).tps, 0)
-    stats.recordDelta(20_000)
+    stats.recordUsage(10_001, 20_000)
     assert.equal(stats.snapshot(20_000).tps, 1)
 })
 

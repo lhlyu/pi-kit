@@ -124,20 +124,26 @@ export default function piKit(pi: ExtensionAPI): void {
         safely((payload, ctx) => {
             if (!isActive(ctx)) return
             const event = payload?.assistantMessageEvent
-
+            const now = performance.now()
+            let hasDelta = false
             switch (event?.type) {
                 case 'text_delta':
                 case 'thinking_delta':
                 case 'toolcall_delta':
                     if (
-                        typeof event.delta !== 'string' ||
-                        event.delta.length === 0
-                    )
-                        return
-                    stats.recordDelta(performance.now())
-                    render(ctx)
+                        typeof event.delta === 'string' &&
+                        event.delta.length > 0
+                    ) {
+                        stats.recordDelta(now)
+                        hasDelta = true
+                    }
                     break
             }
+            const usageUpdated =
+                event && 'partial' in event
+                    ? stats.recordUsage(event.partial?.usage?.output, now)
+                    : false
+            if (hasDelta || usageUpdated) render(ctx)
         }),
     )
 

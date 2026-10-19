@@ -1,6 +1,6 @@
 {
   "name": "@lhlyu/pi-kit",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "个人专属的 Pi Coding Agent 工具箱",
   "type": "module",
   "license": "MIT",

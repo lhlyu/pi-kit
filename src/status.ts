@@ -16,19 +16,19 @@ export interface RoundSnapshot {
     ttft?: { elapsedMs: number; waiting: boolean }
 }
 
-/** 一轮包含多次模型调用和工具执行；平均 TPS 包含首字等待，排除工具耗时。 */
+/** TPS 仅使用服务端 usage；单次调用平均速度包含首字等待，排除工具耗时。 */
 export class RoundStats {
     private startedAt: number | undefined
     private endedAt: number | undefined
     private ttftMs: number | undefined
-    private outputTokens = 0
-    private generationMs = 0
+    private lastTps: number | undefined
     private message:
         | {
               startedAt: number
               generationStartedAt: number | undefined
-              chunks: number
-              samples: number[]
+              outputTokens: number
+              usageStartedAt: number | undefined
+              samples: { time: number; tokens: number }[]
           }
         | undefined
 
@@ -40,8 +40,7 @@ export class RoundStats {
         this.startedAt = now
         this.endedAt = undefined
         this.ttftMs = undefined
-        this.outputTokens = 0
-        this.generationMs = 0
+        this.lastTps = undefined
         this.message = undefined
     }
 
@@ -51,7 +50,8 @@ export class RoundStats {
         this.message = {
             startedAt: now,
             generationStartedAt: undefined,
-            chunks: 0,
+            outputTokens: 0,
+            usageStartedAt: undefined,
             samples: [],
         }
     }
@@ -60,29 +60,45 @@ export class RoundStats {
         this.prepareMessage(now)
         if (!this.message) return
 
-        // 首个非空 delta 才开始生成计时；流式阶段每个 delta 暂计一个 token。
+        // 非空 delta 仅用于确定首字时间，不能代表 token 数量。
         if (this.message.generationStartedAt === undefined) {
             this.message.generationStartedAt = now
             this.ttftMs = Math.max(0, now - this.message.startedAt)
         }
-        this.message.chunks++
-        this.message.samples.push(now)
+    }
+
+    recordUsage(outputTokens: unknown, now: number): boolean {
+        const message = this.message
+        if (
+            !message ||
+            typeof outputTokens !== 'number' ||
+            !Number.isFinite(outputTokens) ||
+            outputTokens <= message.outputTokens
+        )
+            return false
+
+        message.usageStartedAt ??= now
+        message.samples.push({
+            time: now,
+            tokens: outputTokens - message.outputTokens,
+        })
+        message.outputTokens = outputTokens
+        return true
     }
 
     endMessage(outputTokens: unknown, now: number): void {
         if (!this.message) return
 
-        const tokens =
+        const elapsedMs = now - this.message.startedAt
+        if (
             typeof outputTokens === 'number' &&
             Number.isFinite(outputTokens) &&
-            outputTokens > 0
-                ? outputTokens
-                : this.message.chunks
-        if (tokens > 0) {
-            this.outputTokens += tokens
-            // 从调用开始计时，包含首字等待；空失败消息不计入。
-            this.generationMs += Math.max(0, now - this.message.startedAt)
+            outputTokens > 0 &&
+            elapsedMs > 0
+        ) {
+            this.lastTps = (outputTokens * 1_000) / elapsedMs
         }
+        // 缺失最终 usage 时保留上一条已完成调用的平均速度。
         this.message = undefined
     }
 
@@ -98,21 +114,23 @@ export class RoundStats {
                 ? 0
                 : Math.max(0, (this.endedAt ?? now) - this.startedAt)
 
-        // 后续调用等待首字或采样不足时，沿用本轮已完成的平均速度。
-        let tps =
-            this.generationMs > 0
-                ? (this.outputTokens * 1_000) / this.generationMs
-                : undefined
+        // 无可靠流式用量或采样不足时，沿用上一条已完成调用的平均速度。
+        let tps = this.lastTps
         const message = this.message
-        if (message?.generationStartedAt !== undefined) {
+        if (message?.usageStartedAt !== undefined) {
             // 只在限频后的刷新中清理窗口，不在每个 delta 上复制数组。
             message.samples = message.samples.filter(
-                (time) => time > now - WINDOW_MS,
+                ({ time }) => time > now - WINDOW_MS,
             )
-            // 完整采样一秒后才显示估算值，避免短窗口放大批量到达的 delta。
+            // 完整采样一秒后才显示速度；重复的累计用量不重复计数。
             tps =
-                now - message.generationStartedAt >= WINDOW_MS
-                    ? (message.samples.length * 1_000) / WINDOW_MS
+                now - message.usageStartedAt >= WINDOW_MS
+                    ? (message.samples.reduce(
+                          (sum, sample) => sum + sample.tokens,
+                          0,
+                      ) *
+                          1_000) /
+                      WINDOW_MS
                     : tps
         }
         const ttft =
