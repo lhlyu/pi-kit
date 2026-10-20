@@ -70,7 +70,7 @@ test('显示格式及数值颜色符合约定', () => {
 
     assert.equal(
         text,
-        '⚡\u00a0TPS: 50.0 tok/s 🚀\u00a0TTFT: -- ⏳\u00a0TS: 2m35s',
+        '⚡️\u00a0TPS: 50.0 tok/s 🚀\u00a0TTFT: -- ⌛️\u00a0TS: 2m35s',
     )
     assert.deepEqual(colors, [
         { kind: 'rgb', r: 34, g: 197, b: 94 },
@@ -78,7 +78,7 @@ test('显示格式及数值颜色符合约定', () => {
     ])
 })
 
-test('使用默认 emoji 图标，且一个不换行空格不被 Pi 页脚压缩', () => {
+test('使用带变体选择符的默认 emoji 图标，且一个不换行空格不被 Pi 页脚压缩', () => {
     const text = renderStatus(
         { tps: 197.2, elapsedMs: 40_000 },
         {
@@ -86,7 +86,9 @@ test('使用默认 emoji 图标，且一个不换行空格不被 Pi 页脚压缩
             style: (value) => value,
         },
     )
-    assert.doesNotMatch(text, /\uFE0F/u)
+    // 闪电与沙漏默认是文本样式，必须带变体选择符才按 emoji 显示。
+    assert.match(text, /⚡️\u00a0TPS:/u)
+    assert.match(text, /⌛️\u00a0TS:/u)
     // 与宿主页脚一致，不能只测试未清理的原始状态文本。
     const footerText = text
         .replace(/[\r\n\t]/g, ' ')
@@ -95,7 +97,7 @@ test('使用默认 emoji 图标，且一个不换行空格不被 Pi 页脚压缩
 
     assert.equal(
         footerText,
-        '⚡\u00a0TPS: 197.2 tok/s 🚀\u00a0TTFT: -- ⏳\u00a0TS: 40s',
+        '⚡️\u00a0TPS: 197.2 tok/s 🚀\u00a0TTFT: -- ⌛️\u00a0TS: 40s',
     )
 })
 
@@ -274,7 +276,7 @@ test('显示层对无效 TPS 和耗时安全降级', () => {
         colors.length = 0
         assert.equal(
             renderStatus({ tps, elapsedMs: NaN }, theme),
-            '⚡\u00a0TPS: -- tok/s 🚀\u00a0TTFT: -- ⏳\u00a0TS: 0s',
+            '⚡️\u00a0TPS: -- tok/s 🚀\u00a0TTFT: -- ⌛️\u00a0TS: 0s',
         )
         assert.deepEqual(colors, [{ kind: 'rgb', r: 6, g: 182, b: 212 }])
     }
@@ -384,7 +386,7 @@ test('TTFT 显示两位小数，等待和异常值显示占位值', () => {
                     ttft: { elapsedMs, waiting },
                 },
                 theme,
-            ).includes(`TTFT: ${expected} ⏳`),
+            ).includes(`TTFT: ${expected} ⌛️`),
         )
     }
 })

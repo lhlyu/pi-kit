@@ -208,7 +208,7 @@ export function renderStatus(
               })
             : theme.fg('dim', '--')
 
-    // 沙漏默认按 emoji 呈现，避免依赖秒表的变体选择符。
+    // 图标带变体选择符，确保各终端按 emoji 呈现而不是文本样式。
     // Pi 页脚会合并普通空格，用一个不换行空格保留图标后的间距。
-    return `${theme.fg('dim', '⚡\u00a0TPS:')} ${tps} ${theme.fg('dim', '🚀\u00a0TTFT:')} ${ttft} ${theme.fg('dim', '⏳\u00a0TS:')} ${duration}`
+    return `${theme.fg('dim', '⚡️\u00a0TPS:')} ${tps} ${theme.fg('dim', '🚀\u00a0TTFT:')} ${ttft} ${theme.fg('dim', '⌛️\u00a0TS:')} ${duration}`
 }

@@ -84,7 +84,7 @@ test('工厂只注册必要事件，不启动计时器或提供配置命令', (t
     h.emit('session_start')
     assert.equal(
         h.updates.at(-1),
-        '⚡\u00a0TPS: -- tok/s 🚀\u00a0TTFT: -- ⏳\u00a0TS: 0s',
+        '⚡️\u00a0TPS: -- tok/s 🚀\u00a0TTFT: -- ⌛️\u00a0TS: 0s',
     )
     h.tick(5_000)
     assert.equal(h.updates.length, 1)
@@ -107,7 +107,7 @@ test('等待首字时持续计时，结束后强制更新且停止计时器', (t
     h.emit('agent_settled')
     assert.equal(
         h.updates.at(-1),
-        '⚡\u00a0TPS: 25.0 tok/s 🚀\u00a0TTFT: 0.00s ⏳\u00a0TS: 3s',
+        '⚡️\u00a0TPS: 25.0 tok/s 🚀\u00a0TTFT: 0.00s ⌛️\u00a0TS: 3s',
     )
 
     const count = h.updates.length
@@ -170,7 +170,7 @@ test('文本、思考和工具参数都参与实时估算，工具结果和空 d
     h.emit('agent_settled')
     assert.equal(
         h.updates.at(-1),
-        '⚡\u00a0TPS: -- tok/s 🚀\u00a0TTFT: 0.00s ⏳\u00a0TS: 1s',
+        '⚡️\u00a0TPS: -- tok/s 🚀\u00a0TTFT: 0.00s ⌛️\u00a0TS: 1s',
     )
 })
 
@@ -287,7 +287,7 @@ test('会话关闭和重复关闭均可安全清理，后续会话不残留统�
     h.emit('session_start')
     assert.equal(
         h.updates.at(-1),
-        '⚡\u00a0TPS: -- tok/s 🚀\u00a0TTFT: -- ⏳\u00a0TS: 0s',
+        '⚡️\u00a0TPS: -- tok/s 🚀\u00a0TTFT: -- ⌛️\u00a0TS: 0s',
     )
 })
 
@@ -320,7 +320,7 @@ test('只有最终 usage 的消息也参与统计，不会漏掉 token', (t) => 
     h.emit('agent_settled')
     assert.equal(
         h.updates.at(-1),
-        '⚡\u00a0TPS: 25.0 tok/s 🚀\u00a0TTFT: -- ⏳\u00a0TS: 3s',
+        '⚡️\u00a0TPS: 25.0 tok/s 🚀\u00a0TTFT: -- ⌛️\u00a0TS: 3s',
     )
 })
 
@@ -328,43 +328,43 @@ test('TTFT 完整事件链：首次等待、首字冻结、后续等待保留、
     const h = harness(t)
     h.emit('agent_start')
     h.emit('turn_start')
-    assert.match(h.updates.at(-1) ?? '', /TTFT: -- ⏳/)
+    assert.match(h.updates.at(-1) ?? '', /TTFT: -- ⌛️/)
     h.tick(1_000)
-    assert.match(h.updates.at(-1) ?? '', /TTFT: -- ⏳/)
+    assert.match(h.updates.at(-1) ?? '', /TTFT: -- ⌛️/)
     h.tick(230)
     h.emit('message_update', {
         assistantMessageEvent: { type: 'thinking_delta', delta: 'x' },
     })
-    assert.match(h.updates.at(-1) ?? '', /TTFT: 1\.23s ⏳/)
+    assert.match(h.updates.at(-1) ?? '', /TTFT: 1\.23s ⌛️/)
     h.tick(2_000)
     h.emit('message_end', {
         message: { role: 'assistant', usage: { output: 50 } },
     })
     h.tick(5_000)
-    assert.match(h.updates.at(-1) ?? '', /TTFT: 1\.23s ⏳/)
+    assert.match(h.updates.at(-1) ?? '', /TTFT: 1\.23s ⌛️/)
     h.emit('turn_start')
-    assert.match(h.updates.at(-1) ?? '', /TTFT: 1\.23s ⏳/)
+    assert.match(h.updates.at(-1) ?? '', /TTFT: 1\.23s ⌛️/)
     h.tick(1_000)
-    assert.match(h.updates.at(-1) ?? '', /TTFT: 1\.23s ⏳/)
+    assert.match(h.updates.at(-1) ?? '', /TTFT: 1\.23s ⌛️/)
     h.emit('message_update', {
         assistantMessageEvent: { type: 'text_delta', delta: '' },
     })
-    assert.match(h.updates.at(-1) ?? '', /TTFT: 1\.23s ⏳/)
+    assert.match(h.updates.at(-1) ?? '', /TTFT: 1\.23s ⌛️/)
     h.tick(500)
     h.emit('message_update', {
         assistantMessageEvent: { type: 'text_delta', delta: 'x' },
     })
-    assert.match(h.updates.at(-1) ?? '', /TTFT: 1\.50s ⏳/)
+    assert.match(h.updates.at(-1) ?? '', /TTFT: 1\.50s ⌛️/)
     h.emit('message_end', {
         message: { role: 'assistant', usage: { output: 10 } },
     })
     h.emit('turn_start')
     h.tick(1_000)
     h.emit('agent_settled', { aborted: true })
-    assert.match(h.updates.at(-1) ?? '', /TTFT: 1\.50s ⏳/)
+    assert.match(h.updates.at(-1) ?? '', /TTFT: 1\.50s ⌛️/)
     h.emit('agent_start')
     h.emit('turn_start')
-    assert.match(h.updates.at(-1) ?? '', /TTFT: -- ⏳/)
+    assert.match(h.updates.at(-1) ?? '', /TTFT: -- ⌛️/)
 })
 
 test('上一轮真正结束后，新请求会重置耗时和 TPS', (t) => {
@@ -376,7 +376,7 @@ test('上一轮真正结束后，新请求会重置耗时和 TPS', (t) => {
     h.emit('agent_start')
     assert.equal(
         h.updates.at(-1),
-        '⚡\u00a0TPS: -- tok/s 🚀\u00a0TTFT: -- ⏳\u00a0TS: 0s',
+        '⚡️\u00a0TPS: -- tok/s 🚀\u00a0TTFT: -- ⌛️\u00a0TS: 0s',
     )
     h.tick(1_000)
     assert.match(h.updates.at(-1) ?? '', /TS: 1s$/)
@@ -396,7 +396,7 @@ test('取消或报错后结算并停止计时器', (t) => {
     h.emit('agent_settled', { aborted: true })
     assert.equal(
         h.updates.at(-1),
-        '⚡\u00a0TPS: -- tok/s 🚀\u00a0TTFT: -- ⏳\u00a0TS: 2s',
+        '⚡️\u00a0TPS: -- tok/s 🚀\u00a0TTFT: -- ⌛️\u00a0TS: 2s',
     )
     const count = h.updates.length
     h.tick(10_000)
@@ -452,7 +452,7 @@ for (const type of ['text', 'thinking', 'toolcall']) {
         h.emit('agent_settled')
         assert.equal(
             h.updates.at(-1),
-            '⚡\u00a0TPS: 7.1 tok/s 🚀\u00a0TTFT: 5.00s ⏳\u00a0TS: 7s',
+            '⚡️\u00a0TPS: 7.1 tok/s 🚀\u00a0TTFT: 5.00s ⌛️\u00a0TS: 7s',
         )
     })
 }
@@ -479,7 +479,7 @@ test('仅最终 usage 的消息以 turn_start 兜底，不漏算且排除工具�
     h.emit('agent_settled')
     assert.equal(
         h.updates.at(-1),
-        '⚡\u00a0TPS: 25.0 tok/s 🚀\u00a0TTFT: -- ⏳\u00a0TS: 12s',
+        '⚡️\u00a0TPS: 25.0 tok/s 🚀\u00a0TTFT: -- ⌛️\u00a0TS: 12s',
     )
 })
 
@@ -514,7 +514,7 @@ test('缺失或异常事件字段被忽略，不抛异常也不污染有效统�
     h.emit('agent_settled')
     assert.equal(
         h.updates.at(-1),
-        '⚡\u00a0TPS: -- tok/s 🚀\u00a0TTFT: 1.00s ⏳\u00a0TS: 2s',
+        '⚡️\u00a0TPS: -- tok/s 🚀\u00a0TTFT: 1.00s ⌛️\u00a0TS: 2s',
     )
 })
 
@@ -565,7 +565,7 @@ test('定时器中的主题异常被内部消化，后续轮次可以恢复', (t
     h.tick(1_000)
     assert.equal(
         h.updates.at(-1),
-        '⚡\u00a0TPS: -- tok/s 🚀\u00a0TTFT: -- ⏳\u00a0TS: 1s',
+        '⚡️\u00a0TPS: -- tok/s 🚀\u00a0TTFT: -- ⌛️\u00a0TS: 1s',
     )
     h.emit('agent_settled')
 })
@@ -595,7 +595,7 @@ test('关闭后的迟到事件不恢复状态或计时器，新会话仍可正�
     h.tick(1_000)
     assert.equal(
         h.updates.at(-1),
-        '⚡\u00a0TPS: -- tok/s 🚀\u00a0TTFT: -- ⏳\u00a0TS: 1s',
+        '⚡️\u00a0TPS: -- tok/s 🚀\u00a0TTFT: -- ⌛️\u00a0TS: 1s',
     )
     h.emit('agent_settled')
 })
