@@ -1,6 +1,11 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { parseModelList, matchModels } from '../src/model-catalog.ts'
+import {
+    parseModelList,
+    parseModelPage,
+    matchModels,
+} from '../src/model-catalog.ts'
+import { loadBuiltinCatalog } from '../src/builtin-catalog.ts'
 import { parseModelsConfig } from '../src/model-discovery.ts'
 
 const model = (id: string) => ({ id })
@@ -37,10 +42,19 @@ test('分页字段必须类型正确，所有已知续页指示都不能当作�
             assert.throws(() =>
                 parseModelList({ data: [model('chat')], [field]: value }),
             )
-        assert.deepEqual(
-            parseModelList({ data: [model('chat')], [field]: null }),
-            ['chat'],
-        )
+        for (const value of [null, '']) {
+            assert.deepEqual(
+                parseModelList({ data: [model('chat')], [field]: value }),
+                ['chat'],
+            )
+            assert.throws(() =>
+                parseModelPage({
+                    data: [model('chat')],
+                    has_more: true,
+                    [field]: value,
+                }),
+            )
+        }
     }
     for (const value of [true, 'true', 'false', 1, 0, null, {}, []])
         assert.throws(() =>
@@ -74,13 +88,20 @@ test('明确的非聊天产品不会出现在聊天目录，未知模型仍保�
         'gpt-4o-mini-tts',
         'gpt-3.5-turbo-instruct',
         'typesafe/jev',
+        'Qwen3-Embedding-8B',
+        'Qwen/Qwen3-Reranker-8B',
+        'flux.1-dev',
     ]
     const chat = ['gpt-4o', 'my-custom-model', 'embedding-expert-chat']
+    const { nonChatIds } = loadBuiltinCatalog()
     assert.deepEqual(
-        parseModelList({ data: [...nonChat, ...chat].map(model) }),
+        parseModelList({ data: [...nonChat, ...chat].map(model) }, nonChatIds),
         chat.sort(),
     )
-    assert.deepEqual(matchModels(nonChat, [], 'openai-completions'), [])
+    assert.deepEqual(
+        matchModels(nonChat, [], 'openai-completions', undefined, nonChatIds),
+        [],
+    )
 })
 
 test('按响应中的明确类型和输出能力过滤，不仅依赖模型名称', () => {
@@ -148,5 +169,83 @@ test('坏类型元数据或超量响应不接受部分列表', () => {
         parseModelList({
             data: Array.from({ length: 10_001 }, () => model('duplicate')),
         }),
+    )
+})
+
+test('relay 常见厂商前缀、点横线与日期后缀沿用内置能力', () => {
+    const { chat } = loadBuiltinCatalog()
+    const ids = [
+        'openai/gpt-5.2',
+        'anthropic/claude-sonnet-4.5',
+        'google/gemini-2.5-pro',
+        'claude-sonnet-4-5-20250929',
+        'gemini-2.5-pro:batch',
+        'unknown-vendor/model-x',
+    ]
+    const models = matchModels(ids, chat, 'openai-completions')
+    const byId = new Map(models.map((model) => [model.id, model]))
+    const chatInfo = (id: string) =>
+        byId.get(id) as
+            | { name: string; contextWindow: number; reasoning: boolean }
+            | undefined
+    for (const id of ids.slice(0, 5)) {
+        assert.notEqual(chatInfo(id)?.name, id, id)
+        assert.ok((chatInfo(id)?.contextWindow ?? 0) > 32_768, id)
+    }
+    assert.equal(chatInfo('unknown-vendor/model-x')?.contextWindow, 32_768)
+    assert.equal(chatInfo('unknown-vendor/model-x')?.reasoning, false)
+})
+
+test('常见第三方 embedding / rerank 家族被过滤，聊天模型不受影响', () => {
+    const { nonChatIds } = loadBuiltinCatalog()
+    const chat = ['gpt-4o', 'embedding-expert-chat']
+    assert.deepEqual(
+        parseModelList(
+            {
+                data: [
+                    'BAAI/bge-m3',
+                    'voyage-3',
+                    'jina-embeddings-v3',
+                    'nomic-ai/nomic-embed-text',
+                    'cohere/rerank-english-v3.0',
+                    'Qwen/Qwen3-Embedding-8B',
+                    'bge-reranker-v2-m3',
+                    ...chat,
+                ].map(model),
+            },
+            nonChatIds,
+        ),
+        chat.sort(),
+    )
+})
+
+test('分页描述支持链接与游标字段', () => {
+    assert.deepEqual(
+        parseModelPage({ data: [model('chat')], next_cursor: 'abc' }).next,
+        { param: 'cursor', token: 'abc' },
+    )
+    assert.deepEqual(
+        parseModelPage({ data: [model('chat')], next_page_token: 'abc' }).next,
+        { param: 'page_token', token: 'abc' },
+    )
+    assert.deepEqual(
+        parseModelPage({ data: [model('chat')], nextPageToken: 'abc' }).next,
+        { param: 'pageToken', token: 'abc' },
+    )
+    assert.deepEqual(
+        parseModelPage({ data: [model('chat')], next: '/v1/models?page=2' })
+            .next,
+        { url: '/v1/models?page=2' },
+    )
+    assert.deepEqual(
+        parseModelPage({
+            data: [model('chat')],
+            has_more: false,
+            next_cursor: 'ignored',
+        }).next,
+        undefined,
+    )
+    assert.throws(() =>
+        parseModelPage({ data: [model('chat')], has_more: true }),
     )
 })

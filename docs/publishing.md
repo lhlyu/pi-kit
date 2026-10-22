@@ -1,6 +1,6 @@
 # 发布
 
-修改 `package.json` 的 `version` 为新正式版本并推送到 `main`，工作流会自动校验、发布 npm 包并创建 Release。同一提交重跑不会重复上传。
+执行 `npm version <版本号> --no-git-tag-version` 同步更新版本与锁文件，提交并推送到 `main` 后自动发布 npm 包和 GitHub Release。同一提交重跑不会重复上传。
 
 ## 首次配置
 

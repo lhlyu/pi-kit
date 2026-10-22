@@ -54,10 +54,17 @@ test('无效或零 token 数不污染窗口', () => {
     assert.equal(window.getTps(100), 20)
 })
 
-test('估算直接使用示例的正则策略，空白不计入', () => {
+test('估算使用词/标点计数并补字符兜底，空白不计入', () => {
     assert.equal(estimateTokens('hello world!'), 3)
     assert.equal(estimateTokens('中文，测试。'), 6)
     assert.equal(estimateTokens('{"x": 1}'), 7)
     assert.equal(estimateTokens(''), 0)
     assert.equal(estimateTokens(' \n\t'), 0)
+})
+
+test('长标识符和 URL 按字符数兜底，纯空白仍为 0', () => {
+    assert.equal(estimateTokens('a'.repeat(40)), 10)
+    assert.equal(estimateTokens('https://example.com/' + 'x'.repeat(60)), 20)
+    assert.equal(estimateTokens('a b c'), 3)
+    assert.equal(estimateTokens('   \n\t '), 0)
 })

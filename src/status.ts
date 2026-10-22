@@ -118,10 +118,15 @@ export class RoundStats {
         let tps = this.lastTps
         const message = this.message
         // 单次正数可能只是开头的占位 usage，至少增长两次才切换。
+        // 窗口过期说明只是停顿，不应显示成 0 tok/s；回退到上次已知速度。
         if (message && message.usageUpdates >= 2) {
-            tps = message.samples.getTps(now)
+            tps = message.samples.isEmpty(now)
+                ? this.lastTps
+                : message.samples.getTps(now)
         } else if (message?.hasOutput) {
-            tps = message.estimatedSamples.getTps(now)
+            tps = message.estimatedSamples.isEmpty(now)
+                ? this.lastTps
+                : message.estimatedSamples.getTps(now)
         }
         const ttft =
             this.ttftMs !== undefined
@@ -144,7 +149,11 @@ export function formatDuration(ms: number): string {
     if (!Number.isFinite(ms)) return '0s'
     const seconds = Math.floor(Math.max(0, ms) / 1_000)
     if (seconds < 60) return `${seconds}s`
-    return `${Math.floor(seconds / 60)}m${seconds % 60}s`
+    if (seconds < 3_600) {
+        return `${Math.floor(seconds / 60)}m${seconds % 60}s`
+    }
+    const minutes = Math.floor((seconds % 3_600) / 60)
+    return `${Math.floor(seconds / 3_600)}h${minutes}m`
 }
 
 /** TPS：≥100 cyan，≥40 green，≥30 orange，≥15 pink，其余 red。 */

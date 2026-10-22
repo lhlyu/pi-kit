@@ -1,9 +1,12 @@
-import { getAgentDir } from '@earendil-works/pi-coding-agent'
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent'
-import { discoverProviders } from './model-discovery.ts'
-import registerStatus from './status-extension.ts'
+import discoveryExtension from './discovery-extension.ts'
+import statusExtension from './status-extension.ts'
 
+/**
+ * 本地开发入口，同时加载状态栏和模型发现。
+ * 发布包通过 package.json 的 `pi.extensions` 分别加载两个入口。
+ */
 export default async function piKit(pi: ExtensionAPI): Promise<void> {
-    registerStatus(pi)
-    await discoverProviders(pi, { agentDir: getAgentDir() })
+    statusExtension(pi)
+    await discoveryExtension(pi)
 }

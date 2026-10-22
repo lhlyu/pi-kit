@@ -1,11 +1,11 @@
 # @lhlyu/pi-kit
 
-个人专属的 Pi Coding Agent 工具箱。
+Pi Coding Agent 的模型自动发现与终端状态栏扩展。
 
 ## 功能
 
-- **模型自动发现**：支持多个 Provider，无需手动维护模型列表。
-- **终端状态栏**：展示输出速度（TPS）、首 token 耗时（TTFT）和本轮耗时（TS）。TPS 优先使用服务端用量，无流式用量时显示实时估算；调用结束后显示平均速度，缺失最终用量时保留本轮上次平均值。
+- **模型自动发现**：从多个 Provider 获取模型列表，通过原生 `/model` 选择和刷新。
+- **终端状态栏**：显示输出速度（TPS）、首 token 耗时（TTFT）和本轮耗时（TS），支持后台子任务计时。
 
 ```text
 ⚡️ TPS: 50.0 tok/s 🚀 TTFT: 1.23s ⌛️ TS: 2m35s
@@ -21,9 +21,9 @@ pi install npm:@lhlyu/pi-kit
 
 ## 使用
 
-状态栏在交互式终端中自动启用，无需配置。
+状态栏自动启用，无需配置。两个功能可在 `/config` 中单独启停。
 
-如需模型自动发现，在 Pi 用户目录的 `models.json` 中添加 Provider：
+如需模型发现，在 `~/.pi/agent/models.json` 中添加 Provider：
 
 ```json
 {
@@ -38,6 +38,6 @@ pi install npm:@lhlyu/pi-kit
 }
 ```
 
-设置 `RELAY_API_KEY` 环境变量，重启 Pi 或执行 `/reload`，再通过 `/model` 选择模型。
+设置 `RELAY_API_KEY` 环境变量后，重启 Pi 或执行 `/reload`，再用 `/model` 选择模型。模型列表过期时自动刷新。
 
-更多配置见 [模型发现配置](docs/model-discovery.md)。
+更多说明：[模型发现配置](docs/model-discovery.md) · [状态栏](docs/status.md)。

@@ -9,7 +9,7 @@ import {
     ttftColor,
 } from '../src/status.ts'
 
-test('耗时格式化为秒或分钟加秒', () => {
+test('耗时格式化为秒、分钟或小时', () => {
     for (const [ms, text] of [
         [0, '0s'],
         [999, '0s'],
@@ -101,16 +101,16 @@ test('使用带变体选择符的默认 emoji 图标，且一个不换行空格�
     )
 })
 
-test('首个非空 delta 就有实时 TPS，窗口过期后归零', () => {
+test('首个非空 delta 就有实时 TPS，窗口过期后回退上次平均值', () => {
     const stats = new RoundStats()
     stats.start(0)
     stats.prepareMessage(0)
     assert.equal(stats.snapshot(100).tps, undefined)
     stats.recordDelta(100, 'hello')
-    assert.equal(stats.snapshot(100).tps, 10)
+    assert.equal(stats.snapshot(100).tps, 20)
     stats.recordDelta(600, 'word '.repeat(20))
-    assert.equal(stats.snapshot(1_100).tps, 21)
-    assert.equal(stats.snapshot(1_601).tps, 0)
+    assert.equal(stats.snapshot(1_100).tps, 22)
+    assert.equal(stats.snapshot(1_601).tps, undefined)
 })
 
 test('开头的占位 usage 不阻断估算，持续增长后切换到真实用量', () => {
@@ -120,14 +120,14 @@ test('开头的占位 usage 不阻断估算，持续增长后切换到真实用�
     stats.recordUsage(1, 0)
     stats.recordDelta(100, 'hello')
     stats.recordDelta(600, 'world')
-    assert.equal(stats.snapshot(600).tps, 4)
+    assert.equal(stats.snapshot(600).tps, 8)
     stats.recordUsage(31, 600)
     assert.equal(stats.snapshot(600).tps, 31_000 / 600)
     for (const value of [31, 20, 0, -1, NaN, Infinity, undefined, null, '10']) {
         assert.equal(stats.recordUsage(value, 700), false)
     }
     assert.equal(stats.snapshot(1_000).tps, 31)
-    assert.equal(stats.snapshot(1_601).tps, 0)
+    assert.equal(stats.snapshot(1_601).tps, undefined)
 })
 
 test('空 delta 不创建调用或冻结 TTFT，纯空白仍是输出', () => {
@@ -142,7 +142,7 @@ test('空 delta 不创建调用或冻结 TTFT，纯空白仍是输出', () => {
         waiting: true,
     })
     stats.recordDelta(500, ' ')
-    assert.equal(stats.snapshot(500).tps, 0)
+    assert.equal(stats.snapshot(500).tps, undefined)
     assert.deepEqual(stats.snapshot(500).ttft, {
         elapsedMs: 300,
         waiting: false,
@@ -176,7 +176,7 @@ test('工具后等待时保留平均值，输出后使用新窗口，结束只�
     stats.prepareMessage(9_000)
     assert.equal(stats.snapshot(10_000).tps, 25)
     stats.recordDelta(10_000, 'world')
-    assert.equal(stats.snapshot(10_000).tps, 10)
+    assert.equal(stats.snapshot(10_000).tps, 20)
     stats.endMessage(60, 12_000)
     stats.finish(13_000)
     assert.deepEqual(stats.snapshot(30_000), {
@@ -388,5 +388,16 @@ test('TTFT 显示两位小数，等待和异常值显示占位值', () => {
                 theme,
             ).includes(`TTFT: ${expected} ⌛️`),
         )
+    }
+})
+
+test('超过一小时的耗时使用小时和分钟', () => {
+    for (const [ms, text] of [
+        [3_599_999, '59m59s'],
+        [3_600_000, '1h0m'],
+        [5_400_000, '1h30m'],
+        [86_400_000, '24h0m'],
+    ] as const) {
+        assert.equal(formatDuration(ms), text)
     }
 })

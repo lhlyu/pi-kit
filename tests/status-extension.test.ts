@@ -12,8 +12,11 @@ function harness(t: TestContext, mode: ExtensionContext['mode'] = 'tui') {
         string,
         (event: unknown, ctx: ExtensionContext) => unknown
     >()
+    const eventHandlers = new Map<string, (data: unknown) => void>()
     const updates: (string | undefined)[] = []
     let now = 0
+    let sessionId = 'session-1'
+    let sessionFile: string | undefined
 
     t.mock.timers.enable({ apis: ['setInterval', 'setTimeout'] })
     const intervals = t.mock.method(globalThis, 'setInterval')
@@ -29,9 +32,22 @@ function harness(t: TestContext, mode: ExtensionContext['mode'] = 'tui') {
             handlers.set(name, handler)
             return () => handlers.delete(name)
         },
+        events: {
+            on(channel: string, handler: (data: unknown) => void) {
+                eventHandlers.set(channel, handler)
+                return () => eventHandlers.delete(channel)
+            },
+            emit(channel: string, data: unknown) {
+                eventHandlers.get(channel)?.(data)
+            },
+        },
     } as unknown as ExtensionAPI
     const ctx = {
         mode,
+        sessionManager: {
+            getSessionId: () => sessionId,
+            getSessionFile: () => sessionFile,
+        },
         ui: {
             theme: {
                 fg: (_color: string, text: string) => text,
@@ -48,6 +64,7 @@ function harness(t: TestContext, mode: ExtensionContext['mode'] = 'tui') {
 
     return {
         handlers,
+        eventHandlers,
         updates,
         ctx,
         intervals,
@@ -55,6 +72,15 @@ function harness(t: TestContext, mode: ExtensionContext['mode'] = 'tui') {
         emit(name: string, event: unknown = {}) {
             // 与宿主一致：未订阅的事件直接略过，行为断言负责验证订阅是否完整。
             handlers.get(name)?.(event, ctx)
+        },
+        emitEvent(name: string, payload: unknown) {
+            eventHandlers.get(name)?.(payload)
+        },
+        setSessionId(id: string) {
+            sessionId = id
+        },
+        setSessionFile(file: string | undefined) {
+            sessionFile = file
         },
         tick(ms: number) {
             now += ms
@@ -76,6 +102,10 @@ test('工厂只注册必要事件，不启动计时器或提供配置命令', (t
             'agent_settled',
             'session_shutdown',
         ],
+    )
+    assert.deepEqual(
+        [...h.eventHandlers.keys()],
+        ['subagent:async-started', 'subagent:async-complete'],
     )
     h.tick(5_000)
     assert.equal(h.updates.length, 0)
@@ -201,7 +231,7 @@ test('流式 usage 按 token 增量统计，结束后使用单次平均值，缺
     h.emit('turn_start')
     update(undefined)
     h.tick(2_000)
-    assert.match(h.updates.at(-1) ?? '', /TPS: 0\.0 tok\/s/)
+    assert.match(h.updates.at(-1) ?? '', /TPS: 50\.0 tok\/s/)
     h.emit('message_end', { message: { role: 'assistant' } })
     h.emit('agent_settled')
     assert.match(h.updates.at(-1) ?? '', /TPS: 50\.0 tok\/s/)
@@ -219,7 +249,7 @@ test('首个 delta 的 usage 不丢失，空 delta 和非 delta 更新也能刷�
         },
     })
     h.tick(1_000)
-    assert.match(h.updates.at(-1) ?? '', /TPS: 1\.0 tok\/s/)
+    assert.match(h.updates.at(-1) ?? '', /TPS: 2\.0 tok\/s/)
     h.tick(100)
     h.emit('message_update', {
         assistantMessageEvent: {
@@ -259,7 +289,7 @@ test('只有首部占位 usage 和最终 usage 的接口也能实时更新估算
     h.tick(500)
     update('thinking_delta', 'word '.repeat(20))
     h.tick(500)
-    assert.match(h.updates.at(-1) ?? '', /TPS: 21\.0 tok\/s/)
+    assert.match(h.updates.at(-1) ?? '', /TPS: 22\.0 tok\/s/)
     h.tick(100)
     update('toolcall_delta', 'word '.repeat(20))
     h.tick(33)
@@ -856,4 +886,206 @@ test('未开始和已结束轮次的孤立消息事件不刷新状态', (t) => {
         h.tick(1_000)
         h.emit('agent_settled')
     }
+})
+
+test('后台子任务运行期间 TS 继续计时，最后一个任务结束后冻结', (t) => {
+    const h = harness(t)
+    h.emit('session_start')
+    h.emit('agent_start')
+    h.tick(1_000)
+    h.emitEvent('subagent:async-started', {
+        id: 'run-1',
+        sessionId: 'session-1',
+    })
+    h.emit('agent_settled')
+    h.tick(2_000)
+    assert.match(h.updates.at(-1) ?? '', /TS: 3s$/)
+
+    h.emitEvent('subagent:async-complete', {
+        id: 'run-1',
+        sessionId: 'session-1',
+        triggerTurn: false,
+    })
+    assert.match(h.updates.at(-1) ?? '', /TS: 3s$/)
+    const count = h.updates.length
+    h.tick(5_000)
+    assert.equal(h.updates.length, count)
+})
+
+test('后台任务完成后父任务被唤醒时，总耗时连续累计且不重置', (t) => {
+    const h = harness(t)
+    h.emit('session_start')
+    h.emit('agent_start')
+    h.emitEvent('subagent:async-started', {
+        id: 'run-1',
+        sessionId: 'session-1',
+    })
+    h.tick(1_000)
+    h.emit('agent_settled')
+    h.tick(2_000)
+    h.emitEvent('subagent:async-complete', {
+        id: 'run-1',
+        sessionId: 'session-1',
+        triggerTurn: true,
+    })
+    h.emit('agent_start')
+    h.tick(1_000)
+    h.emit('agent_settled')
+    assert.match(h.updates.at(-1) ?? '', /TS: 4s$/)
+
+    const count = h.updates.length
+    h.tick(5_000)
+    assert.equal(h.updates.length, count)
+})
+
+test('后台任务完成但未唤醒父任务时，按完成时刻冻结总耗时', (t) => {
+    const h = harness(t)
+    h.emit('session_start')
+    h.emit('agent_start')
+    h.emitEvent('subagent:async-started', {
+        id: 'run-1',
+        sessionId: 'session-1',
+    })
+    h.tick(1_000)
+    h.emit('agent_settled')
+    h.tick(2_000)
+    h.emitEvent('subagent:async-complete', {
+        id: 'run-1',
+        sessionId: 'session-1',
+        triggerTurn: true,
+    })
+    h.tick(5_000)
+    assert.match(h.updates.at(-1) ?? '', /TS: 3s$/)
+
+    const count = h.updates.length
+    h.tick(5_000)
+    assert.equal(h.updates.length, count)
+})
+
+test('多个后台任务全部结束才冻结；其他会话的任务不影响当前总耗时', (t) => {
+    const h = harness(t)
+    h.emit('session_start')
+    h.emit('agent_start')
+    h.emitEvent('subagent:async-started', {
+        id: 'run-1',
+        sessionId: 'session-1',
+    })
+    h.emitEvent('subagent:async-started', {
+        id: 'run-2',
+        sessionId: 'session-1',
+    })
+    h.emitEvent('subagent:async-started', {
+        id: 'other',
+        sessionId: 'session-2',
+    })
+    h.tick(1_000)
+    h.emit('agent_settled')
+    h.emitEvent('subagent:async-complete', {
+        id: 'run-1',
+        sessionId: 'session-1',
+        triggerTurn: false,
+    })
+    h.tick(1_000)
+    assert.match(h.updates.at(-1) ?? '', /TS: 2s$/)
+    h.emitEvent('subagent:async-complete', {
+        id: 'run-2',
+        sessionId: 'session-1',
+        triggerTurn: false,
+    })
+    assert.match(h.updates.at(-1) ?? '', /TS: 2s$/)
+    const count = h.updates.length
+    h.tick(5_000)
+    assert.equal(h.updates.length, count)
+})
+
+test('会话切换和关闭清理后台状态，迟到或异常事件不影响新会话', (t) => {
+    const h = harness(t)
+    h.emit('session_start')
+    h.emit('agent_start')
+    h.emitEvent('subagent:async-started', {
+        id: 'run-1',
+        sessionId: 'session-1',
+    })
+    h.tick(1_000)
+    h.emit('agent_settled')
+    h.emit('session_shutdown')
+    h.emitEvent('subagent:async-complete', {
+        id: 'run-1',
+        sessionId: 'session-1',
+    })
+    assert.equal(h.updates.at(-1), undefined)
+
+    h.setSessionId('session-2')
+    h.emit('session_start')
+    h.emit('agent_start')
+    h.tick(1_000)
+    h.emit('agent_settled')
+    assert.match(h.updates.at(-1) ?? '', /TS: 1s$/)
+    assert.doesNotThrow(() => h.emitEvent('subagent:async-started', null))
+    assert.doesNotThrow(() => h.emitEvent('subagent:async-complete', {}))
+})
+
+test('完成事件先于父任务 settled 时，批量通知唤醒仍连续累计 TS', (t) => {
+    const h = harness(t)
+    h.emit('session_start')
+    h.emit('agent_start')
+    h.emitEvent('subagent:async-started', {
+        id: 'run-1',
+        sessionId: 'session-1',
+    })
+    h.tick(1_000)
+    h.emitEvent('subagent:async-complete', {
+        id: 'run-1',
+        sessionId: 'session-1',
+    })
+    h.tick(1_000)
+    h.emit('agent_settled')
+    h.tick(1_000)
+    h.emit('agent_start')
+    h.tick(2_000)
+    h.emit('agent_settled')
+    assert.match(h.updates.at(-1) ?? '', /TS: 5s$/)
+})
+
+test('完成事件先于 settled 且未唤醒时，不丢失父任务最后的处理耗时', (t) => {
+    const h = harness(t)
+    h.emit('session_start')
+    h.emit('agent_start')
+    h.emitEvent('subagent:async-started', {
+        id: 'run-1',
+        sessionId: 'session-1',
+    })
+    h.tick(1_000)
+    h.emitEvent('subagent:async-complete', {
+        id: 'run-1',
+        sessionId: 'session-1',
+    })
+    h.tick(2_000)
+    h.emit('agent_settled')
+    h.tick(5_000)
+    assert.match(h.updates.at(-1) ?? '', /TS: 3s$/)
+    const count = h.updates.length
+    h.tick(5_000)
+    assert.equal(h.updates.length, count)
+})
+
+test('后台事件用会话文件路径标识时也能继续计时', (t) => {
+    const h = harness(t)
+    h.setSessionFile('/tmp/session.jsonl')
+    h.emit('session_start')
+    h.emit('agent_start')
+    h.emitEvent('subagent:async-started', {
+        id: 'run-1',
+        sessionId: '/tmp/session.jsonl',
+    })
+    h.tick(1_000)
+    h.emit('agent_settled')
+    h.tick(1_000)
+    assert.match(h.updates.at(-1) ?? '', /TS: 2s$/)
+    h.emitEvent('subagent:async-complete', {
+        id: 'run-1',
+        sessionId: '/tmp/session.jsonl',
+        triggerTurn: false,
+    })
+    assert.match(h.updates.at(-1) ?? '', /TS: 2s$/)
 })

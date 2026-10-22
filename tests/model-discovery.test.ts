@@ -7,7 +7,6 @@ import {
     stat,
     writeFile,
 } from 'node:fs/promises'
-import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { spawn } from 'node:child_process'
@@ -54,15 +53,34 @@ async function harness(t: TestContext) {
         warnings,
         pi,
         config,
-        async load(request: typeof fetch, timeoutMs = 100) {
+        async load(
+            request: typeof fetch,
+            timeoutMs = 100,
+            options: {
+                cacheTtlMs?: number | undefined
+                offline?: boolean
+                now?: () => number
+                debug?: boolean
+            } = {},
+        ) {
             registrations.clear()
             warnings.length = 0
-            await discoverProviders(pi, {
-                agentDir,
-                request,
-                timeoutMs,
-                warn: (message) => warnings.push(message),
-            })
+            // 模拟请求永不完成时，Node 的 AbortSignal.timeout 不会单独保活事件循环；
+            // 在测试里保留一个句柄，让超时回调有机会执行。
+            const keepAlive = setTimeout(() => {}, timeoutMs + 100)
+            try {
+                await discoverProviders(pi, {
+                    agentDir,
+                    request,
+                    timeoutMs,
+                    // 测试默认强制刷新，缓存新鲜度由专门用例覆盖。
+                    cacheTtlMs: 0,
+                    warn: (message) => warnings.push(message),
+                    ...options,
+                })
+            } finally {
+                clearTimeout(keepAlive)
+            }
         },
         async cache() {
             const dir = join(agentDir, 'pi-kit/cache/providers')
@@ -169,7 +187,7 @@ test('默认拼接 /models，modelsUrl 为完整地址；各 Provider 鉴权独�
     assert.equal(h.registrations.size, 2)
     assert.equal(h.warnings.length, 0)
     for (const config of h.registrations.values()) {
-        assert.equal(config.refreshModels, undefined)
+        assert.equal(typeof config.refreshModels, 'function')
         assert.equal(config.oauth, undefined)
     }
     assert.ok(
@@ -293,7 +311,7 @@ test('失败、无效响应、空列表、鉴权失败均保留缓存；成功�
     )
 })
 
-test('超时独立取消，失败无缓存跳过，不阻塞其他 Provider', async (t) => {
+test('超时独立取消，失败无缓存注册空目录待重试，不阻塞其他 Provider', async (t) => {
     const h = await harness(t)
     await h.config({
         slow: { ...provider, modelsUrl: 'https://slow.example/models' },
@@ -314,7 +332,8 @@ test('超时独立取消，失败无缓存跳过，不阻塞其他 Provider', as
         })
     }, 10)
     assert.ok(aborted)
-    assert.deepEqual([...h.registrations.keys()], ['good'])
+    assert.deepEqual([...h.registrations.keys()].sort(), ['good', 'slow'])
+    assert.deepEqual(h.registrations.get('slow')?.models, [])
     assert.match(h.warnings[0]!, /无缓存/)
 })
 
@@ -340,7 +359,7 @@ test('超时覆盖响应体读取，不只覆盖响应头', async (t) => {
     assert.equal(h.registrations.get('relay')?.models?.[0]?.id, 'cached')
 })
 
-test('坏缓存不注册；更改端点后不复用旧缓存；不修改配置和认证文件', async (t) => {
+test('坏缓存不提供模型；更改端点后不复用旧缓存；不修改配置和认证文件', async (t) => {
     const h = await harness(t)
     await h.config({ relay: provider })
     await writeFile(join(h.agentDir, 'auth.json'), '{"unchanged":true}')
@@ -352,7 +371,7 @@ test('坏缓存不注册；更改端点后不复用旧缓存；不修改配置�
     await h.load(async () => {
         throw new Error('offline')
     })
-    assert.equal(h.registrations.size, 0)
+    assert.deepEqual(h.registrations.get('relay')?.models, [])
     assert.equal(
         await readFile(join(h.agentDir, 'models.json'), 'utf8'),
         before,
@@ -368,7 +387,7 @@ test('坏缓存不注册；更改端点后不复用旧缓存；不修改配置�
     await h.load(async () => {
         throw new Error('offline')
     })
-    assert.equal(h.registrations.size, 0)
+    assert.deepEqual(h.registrations.get('relay')?.models, [])
 })
 
 test('只处理显式开启的独立 Provider；拒绝覆盖内置、静态列表和 OAuth', async (t) => {
@@ -419,7 +438,7 @@ test('当前官方配置接受扩展字段，原生兼容配置和 modelOverride
     assert.deepEqual(model?.compat, { supportsStore: false })
     assert.equal(model?.api, 'openai-completions')
     await runtime.refresh({ providers: ['relay'], allowNetwork: true })
-    assert.equal(requests, 1)
+    assert.equal(requests, 2)
     assert.equal((await runtime.getAvailable('relay')).length, 1)
 })
 
@@ -458,33 +477,21 @@ function runCli(
     })
 }
 
-test('真实异步扩展工厂使 pi --list-models 可见；重复加载成功删除，离线使用缓存', async (t) => {
+test('真实异步扩展工厂使 pi --list-models 可见；离线直接使用缓存并删除旧模型', async (t) => {
     const h = await harness(t)
     let ids = ['pi-kit-test-first', 'pi-kit-test-second']
-    let requests = 0
-    let fail = false
     const requestKeys: (string | undefined)[] = []
-    const server = createServer((req, res) => {
-        requests++
-        requestKeys.push(req.headers.authorization)
-        res.setHeader('content-type', 'application/json')
-        res.end(JSON.stringify({ data: fail ? [] : ids.map((id) => ({ id })) }))
-    })
-    await new Promise<void>((done) => server.listen(0, '127.0.0.1', done))
-    t.after(
-        () =>
-            new Promise<void>((done, reject) =>
-                server.close((error) => (error ? reject(error) : done())),
-            ),
-    )
-    const address = server.address()
-    assert.ok(address && typeof address !== 'string')
-    await h.config({
-        'pi-kit-test-relay': {
-            ...provider,
-            baseUrl: `http://127.0.0.1:${address.port}/v1`,
-        },
-    })
+    await h.config({ 'pi-kit-test-relay': provider })
+    const request = async (
+        _url: string | URL | Request,
+        options?: RequestInit,
+    ) => {
+        requestKeys.push(
+            new Headers(options?.headers).get('authorization') ?? undefined,
+        )
+        return response(ids)
+    }
+    await h.load(request)
     const args = [
         '--no-skills',
         '--no-prompt-templates',
@@ -494,43 +501,23 @@ test('真实异步扩展工厂使 pi --list-models 可见；重复加载成功�
         '--list-models',
         'pi-kit-test-relay',
     ]
+    // runCli 设置 PI_OFFLINE=1：真实宿主应只读扩展缓存，不再请求网络。
     const first = await runCli(args, h.agentDir)
     assert.equal(first.code, 0, first.stderr)
     assert.match(first.stdout, /pi-kit-test-first/, first.stderr)
     assert.match(first.stdout, /pi-kit-test-second/)
-    assert.equal(requests, 1)
+
     ids = ['pi-kit-test-second']
-    await writeFile(
-        join(h.agentDir, 'auth.json'),
-        JSON.stringify({
-            'pi-kit-test-relay': { type: 'api_key', key: 'saved-key' },
-        }),
-    )
-    await h.config({
-        'pi-kit-test-relay': {
-            ...provider,
-            apiKey: undefined,
-            baseUrl: `http://127.0.0.1:${address.port}/v1`,
-        },
-    })
+    await h.load(request)
     const second = await runCli(args, h.agentDir)
     assert.equal(second.code, 0, second.stderr)
     assert.ok(!second.stdout.includes('pi-kit-test-first'))
     assert.match(second.stdout, /pi-kit-test-second/)
-    fail = true
-    const offline = await runCli(args, h.agentDir)
-    assert.equal(offline.code, 0, offline.stderr)
-    assert.match(offline.stdout, /pi-kit-test-second/)
-    assert.match(offline.stderr, /使用上次成功缓存/)
-    assert.equal(requests, 3)
-    assert.deepEqual(requestKeys, [
-        'Bearer private-key',
-        'Bearer saved-key',
-        'Bearer saved-key',
-    ])
+
+    assert.deepEqual(requestKeys, ['Bearer private-key', 'Bearer private-key'])
 })
 
-test('原生资源 reload 重新等待异步工厂，替换注册列表而不安装发现钩子', async (t) => {
+test('原生资源 reload 重新等待异步工厂，替换注册列表并安装原生发现钩子', async (t) => {
     const h = await harness(t)
     await h.config({ relay: provider })
     let ids = ['old', 'retained']
@@ -547,6 +534,7 @@ test('原生资源 reload 重新等待异步工厂，替换注册列表而不安
             async (pi) => {
                 await discoverProviders(pi, {
                     agentDir: h.agentDir,
+                    cacheTtlMs: 0,
                     request: async () => {
                         requests++
                         return response(ids)
@@ -580,8 +568,9 @@ test('原生资源 reload 重新等待异步工厂，替换注册列表而不安
     )
     assert.equal(requests, 2)
     assert.equal(
-        reloaded.runtime.pendingProviderRegistrations[0]?.config.refreshModels,
-        undefined,
+        typeof reloaded.runtime.pendingProviderRegistrations[0]?.config
+            .refreshModels,
+        'function',
     )
     assert.equal(reloaded.extensions[0]?.commands.size, 0)
 })
@@ -638,7 +627,7 @@ test('认证 Runtime 初始化失败不会中断加载：各 Provider 独立回�
     await h.load(async () => assert.fail('初始化失败后不应发起请求'))
     assert.equal(create.mock.callCount(), 1)
     assert.equal(h.registrations.get('relay')?.models?.[0]?.id, 'cached')
-    assert.equal(h.registrations.has('fresh'), false)
+    assert.deepEqual(h.registrations.get('fresh')?.models, [])
     assert.equal(h.warnings.length, 2)
     assert.ok(
         h.warnings.some((warning) => warning.includes('使用上次成功缓存')),
@@ -937,6 +926,185 @@ test('原子缓存权限受限、无残留临时文件；过大的坏缓存安�
     await h.load(async () => {
         throw new Error('offline')
     })
-    assert.equal(h.registrations.size, 0)
+    assert.deepEqual(h.registrations.get('relay')?.models, [])
     assert.match(h.warnings[0]!, /无缓存/)
+})
+
+test('缓存新鲜时直接注册，过期后才请求网络', async (t) => {
+    const h = await harness(t)
+    await h.config({ relay: provider })
+    let requests = 0
+    await h.load(async () => {
+        requests++
+        return response(['cached'])
+    })
+    await h.load(
+        async () => {
+            requests++
+            return response(['fresh'])
+        },
+        100,
+        { cacheTtlMs: 60_000 },
+    )
+    assert.equal(requests, 1)
+    assert.deepEqual(
+        h.registrations.get('relay')?.models?.map((model) => model.id),
+        ['cached'],
+    )
+
+    await h.load(
+        async () => {
+            requests++
+            return response(['fresh'])
+        },
+        100,
+        { cacheTtlMs: 60_000, now: () => Date.now() + 61 * 60_000 },
+    )
+    assert.equal(requests, 2)
+    assert.deepEqual(
+        h.registrations.get('relay')?.models?.map((model) => model.id),
+        ['fresh'],
+    )
+})
+
+test('缓存 TTL 可按 Provider 配置，0 表示每次刷新', async (t) => {
+    const h = await harness(t)
+    await h.config({
+        relay: { ...provider, cacheTtlMinutes: 0 },
+    })
+    let requests = 0
+    for (let i = 0; i < 2; i++)
+        await h.load(
+            async () => {
+                requests++
+                return response(['chat'])
+            },
+            100,
+            { cacheTtlMs: undefined },
+        )
+    assert.equal(requests, 2)
+})
+
+test('离线模式有缓存直接注册，无缓存保留空目录且不请求网络', async (t) => {
+    const h = await harness(t)
+    await h.config({ relay: provider })
+    let requests = 0
+    await h.load(async () => {
+        requests++
+        return response(['cached'])
+    })
+    await h.load(
+        async () => {
+            requests++
+            throw new Error('offline')
+        },
+        100,
+        { offline: true },
+    )
+    assert.equal(requests, 1)
+    assert.deepEqual(
+        h.registrations.get('relay')?.models?.map((model) => model.id),
+        ['cached'],
+    )
+    assert.equal(h.warnings.length, 0)
+
+    await h.config({
+        relay: provider,
+        fresh: { ...provider, baseUrl: 'https://fresh.example/v1' },
+    })
+    await h.load(
+        async () => {
+            requests++
+            throw new Error('offline')
+        },
+        100,
+        { offline: true },
+    )
+    assert.equal(requests, 1)
+    assert.deepEqual([...h.registrations.keys()].sort(), ['fresh', 'relay'])
+    assert.deepEqual(h.registrations.get('fresh')?.models, [])
+    assert.equal(h.warnings.length, 0)
+})
+
+test('移除或改名 Provider 后清理旧缓存', async (t) => {
+    const h = await harness(t)
+    await h.config({
+        a: provider,
+        b: { ...provider, baseUrl: 'https://b.example/v1' },
+    })
+    await h.load(async () => response(['chat']))
+    const dir = join(h.agentDir, 'pi-kit/cache/providers')
+    assert.equal((await readdir(dir)).length, 2)
+
+    await h.config({ a: provider })
+    await h.load(
+        async () => {
+            throw new Error('offline')
+        },
+        100,
+        { cacheTtlMs: 60_000 },
+    )
+    assert.equal((await readdir(dir)).length, 1)
+    assert.deepEqual([...h.registrations.keys()], ['a'])
+})
+
+test('游标和同源链接自动翻页，跨源链接拒绝且不泄露鉴权', async (t) => {
+    const h = await harness(t)
+    await h.config({ relay: provider })
+    const urls: string[] = []
+    await h.load(async (url) => {
+        urls.push(String(url))
+        return urls.length === 1
+            ? Response.json({
+                  data: [{ id: 'a' }],
+                  next_cursor: 'page-2',
+              })
+            : Response.json({ data: [{ id: 'b' }], next_cursor: '' })
+    })
+    assert.equal(urls.length, 2)
+    assert.match(urls[1]!, /cursor=page-2/)
+    assert.deepEqual(
+        h.registrations.get('relay')?.models?.map((model) => model.id),
+        ['a', 'b'],
+    )
+
+    // 部分接口会在最后一页返回空 data；应保留前面已收集的模型。
+    urls.length = 0
+    await h.load(
+        async (url) => {
+            urls.push(String(url))
+            return urls.length === 1
+                ? Response.json({
+                      data: [{ id: 'a' }],
+                      has_more: true,
+                      next_cursor: 'last',
+                  })
+                : Response.json({ data: [] })
+        },
+        100,
+        { cacheTtlMs: 0 },
+    )
+    assert.deepEqual(
+        h.registrations.get('relay')?.models?.map((model) => model.id),
+        ['a'],
+    )
+
+    urls.length = 0
+    await h.load(
+        async (url) => {
+            urls.push(String(url))
+            return Response.json({
+                data: [{ id: 'c' }],
+                next: 'https://evil.example/models?page=2',
+            })
+        },
+        100,
+        { cacheTtlMs: 0 },
+    )
+    assert.equal(urls.length, 1)
+    assert.deepEqual(
+        h.registrations.get('relay')?.models?.map((model) => model.id),
+        ['a'],
+    )
+    assert.match(h.warnings[0]!, /使用上次成功缓存/)
 })

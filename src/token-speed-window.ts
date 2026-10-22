@@ -16,6 +16,12 @@ export class SlidingWindow {
         this.events.push({ time: now, tokens })
     }
 
+    /** 窗口内没有样本时由调用方决定回退值，而不是把停顿显示成 0。 */
+    isEmpty(now: number): boolean {
+        this.prune(now)
+        return this.windowStartIndex >= this.events.length
+    }
+
     getTps(now: number): number {
         this.prune(now)
         if (this.windowStartIndex >= this.events.length) return 0
@@ -48,7 +54,12 @@ export class SlidingWindow {
     }
 }
 
-/** 与示例 estimate 策略一致：单词或非空白标点分别计数，并非精确分词。 */
+/**
+ * 估算输出 token：词/标点计数对中文和普通英文较准，按 4 字符/token 兜底长标识符、
+ * URL 和压缩代码。仅用于实时速度，最终仍以服务端 usage 为准。
+ */
 export function estimateTokens(text: string): number {
-    return text.match(/\w+|[^\s\w]/g)?.length ?? 0
+    const words = text.match(/\w+|[^\s\w]/g)?.length ?? 0
+    const compactLength = text.replace(/\s+/g, '').length
+    return Math.max(words, Math.ceil(compactLength / 4))
 }
