@@ -644,30 +644,6 @@ test('计时器创建异常被消化，恢复后可重新开始', (t) => {
     h.emit('agent_settled')
 })
 
-test('异常处理中的计时器清理失败也不外抛，遗留回调不再刷新', (t) => {
-    const h = harness(t)
-    h.emit('agent_start')
-    const status = t.mock.method(h.ctx.ui, 'setStatus', () => {
-        throw new Error('状态栏不可用')
-    })
-    const clear = t.mock.method(globalThis, 'clearInterval', () => {
-        throw new Error('无法清理计时器')
-    })
-    assert.doesNotThrow(() => h.tick(1_000))
-    status.mock.restore()
-    const count = h.updates.length
-    h.tick(5_000)
-    assert.equal(h.updates.length, count)
-    assert.doesNotThrow(() => h.emit('session_shutdown'))
-    clear.mock.restore()
-    h.emit('session_start')
-    h.emit('agent_start')
-    const restarted = h.updates.length
-    h.tick(1_000)
-    assert.equal(h.updates.length, restarted + 1)
-    h.emit('agent_settled')
-})
-
 test('不涉及渲染的回调发生异常也不会传递给宿主', (t) => {
     const h = harness(t)
     h.emit('agent_start')
@@ -780,31 +756,6 @@ test('尾部刷新异常被隔离，停止所有计时器，后续轮次可恢�
     h.emit('agent_start')
     h.tick(1_000)
     assert.match(h.updates.at(-1) ?? '', /TS: 1s$/)
-    h.emit('agent_settled')
-})
-
-test('clearTimeout 失败后遗留回调失效，不干扰新会话的待刷新任务', (t) => {
-    const h = harness(t)
-    h.emit('agent_start')
-    h.emit('message_update', {
-        assistantMessageEvent: { type: 'text_delta', delta: 'a' },
-    })
-    const clear = t.mock.method(globalThis, 'clearTimeout', () => {
-        throw new Error('无法清理计时器')
-    })
-    assert.doesNotThrow(() => h.emit('session_shutdown'))
-    clear.mock.restore()
-    h.tick(10)
-    h.emit('session_start')
-    h.emit('agent_start')
-    h.emit('message_update', {
-        assistantMessageEvent: { type: 'text_delta', delta: 'b' },
-    })
-    const count = h.updates.length
-    h.tick(23)
-    assert.equal(h.updates.length, count)
-    h.tick(10)
-    assert.equal(h.updates.length, count + 1)
     h.emit('agent_settled')
 })
 

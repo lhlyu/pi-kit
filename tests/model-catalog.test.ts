@@ -249,3 +249,20 @@ test('分页描述支持链接与游标字段', () => {
         parseModelPage({ data: [model('chat')], has_more: true }),
     )
 })
+
+test('Anthropic 的 has_more + last_id 用 after_id 续页', () => {
+    assert.deepEqual(
+        parseModelPage({
+            data: [model('claude-sonnet-4-5')],
+            has_more: true,
+            first_id: 'claude-sonnet-4-5',
+            last_id: 'claude-sonnet-4-5',
+        }).next,
+        { param: 'after_id', token: 'claude-sonnet-4-5' },
+    )
+    // 缺少 has_more 时不按 last_id 猜续页，避免服务端复述 last_id 导致翻页不终止。
+    assert.equal(
+        parseModelPage({ data: [model('chat')], last_id: 'chat' }).next,
+        undefined,
+    )
+})

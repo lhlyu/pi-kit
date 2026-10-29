@@ -25,7 +25,9 @@ import {
 import type { ModelPage } from './model-catalog.ts'
 import type { BuiltinCatalog } from './builtin-catalog.ts'
 
-const MAX_BYTES = 2 * 1024 * 1024
+const MAX_PAGE_BYTES = 2 * 1024 * 1024
+// 完整目录可能跨多页，缓存上限需覆盖 MAX_MODELS 个不超 512 字符的 ID。
+const MAX_CACHE_BYTES = 8 * 1024 * 1024
 const MAX_PAGES = 20
 const DEFAULT_CACHE_TTL_MINUTES = 5
 const httpUrl = Type.Refine(
@@ -168,7 +170,7 @@ async function readResponseBody(
         throw new Error('模型发现 HTTP 响应无效')
     }
     const declared = Number(response.headers.get('content-length'))
-    if (Number.isFinite(declared) && declared > MAX_BYTES) {
+    if (Number.isFinite(declared) && declared > MAX_PAGE_BYTES) {
         void response.body.cancel().catch(() => {})
         throw new Error('模型列表过大')
     }
@@ -180,7 +182,7 @@ async function readResponseBody(
             const { done, value } = await reader.read()
             if (done) break
             length += value.length
-            if (length > MAX_BYTES) throw new Error('模型列表过大')
+            if (length > MAX_PAGE_BYTES) throw new Error('模型列表过大')
             chunks.push(value)
         }
         signal.throwIfAborted()
@@ -267,7 +269,7 @@ async function readCache(
     fingerprint: string,
 ): Promise<{ ids: string[]; checkedAt: number } | undefined> {
     try {
-        if ((await stat(path)).size > MAX_BYTES) return undefined
+        if ((await stat(path)).size > MAX_CACHE_BYTES) return undefined
         const value = Value.Parse(
             cacheSchema,
             JSON.parse(await readFile(path, 'utf8')) as unknown,
@@ -396,7 +398,11 @@ export async function discoverProviders(
         warnFailure('加载内置模型目录', '跳过模型发现', error)
         return
     }
-    const offline = options.offline ?? process.env.PI_OFFLINE !== undefined
+    // 与宿主的 PI_OFFLINE 语义一致：只认 1/true/yes，避免 PI_OFFLINE=0 反而断网。
+    const offlineFlag = process.env.PI_OFFLINE?.toLowerCase()
+    const offline =
+        options.offline ??
+        (offlineFlag === '1' || offlineFlag === 'true' || offlineFlag === 'yes')
     const now = options.now ?? Date.now
     const timeoutMs = options.timeoutMs ?? 5_000
     const authTimeoutMs = options.authTimeoutMs ?? Math.min(2_000, timeoutMs)

@@ -29,35 +29,20 @@ export default function piKit(pi: ExtensionAPI): void {
     const backgroundRuns = new Set<string>()
 
     const cancelPendingRender = () => {
-        const current = pendingRender
+        clearTimeout(pendingRender)
         pendingRender = undefined
-        try {
-            if (current !== undefined) clearTimeout(current)
-        } catch {
-            // 即使清理失败，回调也会通过身份校验失效。
-        }
     }
 
     const stopTimer = () => {
         cancelPendingRender()
-        const current = timer
+        clearInterval(timer)
         timer = undefined
-        try {
-            if (current !== undefined) clearInterval(current)
-        } catch {
-            // 清理本身也可能失败，不能让异常逃出安全边界。
-        }
     }
 
     const clearWakeTimer = () => {
-        const current = wakeTimer
+        clearTimeout(wakeTimer)
         wakeTimer = undefined
         pendingFinishAt = undefined
-        try {
-            if (current !== undefined) clearTimeout(current)
-        } catch {
-            // 回调仍会通过身份校验失效。
-        }
     }
 
     // 后台任务由 pi-subagents 通过进程内事件总线广播；未安装时没有事件，
@@ -101,10 +86,6 @@ export default function piKit(pi: ExtensionAPI): void {
                 // 事件总线上的异常不能拖垮状态栏或宿主。
             }
         }
-    }
-
-    const remember = (ctx: ExtensionContext) => {
-        lastCtx = ctx
     }
 
     const backgroundStarted = (payload: unknown) => {
@@ -195,7 +176,7 @@ export default function piKit(pi: ExtensionAPI): void {
     pi.on(
         'session_start',
         safely((_event, ctx) => {
-            remember(ctx)
+            lastCtx = ctx
             stopTimer()
             clearWakeTimer()
             backgroundRuns.clear()
@@ -223,7 +204,7 @@ export default function piKit(pi: ExtensionAPI): void {
     pi.on(
         'agent_start',
         safely((_event, ctx) => {
-            remember(ctx)
+            lastCtx = ctx
             agentActive = true
             clearWakeTimer()
             if (ctx.mode !== 'tui' || isShutdown) return
@@ -295,7 +276,7 @@ export default function piKit(pi: ExtensionAPI): void {
     pi.on(
         'agent_settled',
         safely((_event, ctx) => {
-            remember(ctx)
+            lastCtx = ctx
             agentActive = false
             if (!isActive(ctx)) {
                 stopTimer()
@@ -314,7 +295,7 @@ export default function piKit(pi: ExtensionAPI): void {
     pi.on(
         'session_shutdown',
         safely((_event, ctx) => {
-            remember(ctx)
+            lastCtx = ctx
             isShutdown = true
             agentActive = false
             backgroundRuns.clear()

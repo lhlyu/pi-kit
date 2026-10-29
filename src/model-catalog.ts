@@ -39,6 +39,8 @@ const pageSchema = Type.Object({
     next_cursor: nullableCursor,
     next_page_token: nullableCursor,
     nextPageToken: nullableCursor,
+    // Anthropic 风格：续页用 after_id=<last_id>。
+    last_id: nullableCursor,
 })
 type ParsedPage = Type.Static<typeof pageSchema>
 
@@ -47,7 +49,7 @@ export interface ModelPage {
     next?:
         | { url: string }
         | {
-              param: 'cursor' | 'page' | 'page_token' | 'pageToken'
+              param: 'cursor' | 'page' | 'page_token' | 'pageToken' | 'after_id'
               token: string
           }
 }
@@ -82,6 +84,7 @@ function nextPageOf(page: {
     next_cursor?: string | null
     next_page_token?: string | null
     nextPageToken?: string | null
+    last_id?: string | null
 }): ModelPage['next'] {
     // has_more: false 是服务端明确的结束信号，忽略可能残留的游标。
     if (page.has_more === false) return undefined
@@ -103,6 +106,9 @@ function nextPageOf(page: {
         return { param: 'page', token: link }
     }
     if (cursor) return cursor
+    // 仅 has_more 明确为 true 时按 last_id 续页，避免服务端复述 last_id 时死循环。
+    if (page.has_more === true && page.last_id)
+        return { param: 'after_id', token: page.last_id }
     if (page.has_more === true) throw new Error('模型分页不完整')
     return undefined
 }

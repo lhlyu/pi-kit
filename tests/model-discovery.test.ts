@@ -1108,3 +1108,103 @@ test('游标和同源链接自动翻页，跨源链接拒绝且不泄露鉴权',
     )
     assert.match(h.warnings[0]!, /使用上次成功缓存/)
 })
+
+test('Anthropic 分页按 after_id 续页，末页停止后合并全部模型', async (t) => {
+    const h = await harness(t)
+    await h.config({ relay: { ...provider, api: 'anthropic-messages' } })
+    const urls: string[] = []
+    await h.load(async (url) => {
+        urls.push(String(url))
+        return urls.length === 1
+            ? Response.json({
+                  data: [{ id: 'claude-a', type: 'model' }],
+                  has_more: true,
+                  first_id: 'claude-a',
+                  last_id: 'claude-a',
+              })
+            : Response.json({
+                  data: [{ id: 'claude-b', type: 'model' }],
+                  has_more: false,
+                  first_id: 'claude-b',
+                  last_id: 'claude-b',
+              })
+    })
+    assert.equal(urls.length, 2)
+    assert.match(urls[1]!, /after_id=claude-a/)
+    assert.deepEqual(
+        h.registrations.get('relay')?.models?.map((model) => model.id),
+        ['claude-a', 'claude-b'],
+    )
+    assert.deepEqual(h.warnings, [])
+})
+
+test('PI_OFFLINE 只认 1/true/yes，其他值仍允许联网刷新', async (t) => {
+    const h = await harness(t)
+    await h.config({ relay: provider })
+    const old = process.env.PI_OFFLINE
+    t.after(() => {
+        if (old === undefined) delete process.env.PI_OFFLINE
+        else process.env.PI_OFFLINE = old
+    })
+    for (const flag of ['0', 'false', '']) {
+        process.env.PI_OFFLINE = flag
+        let requests = 0
+        await h.load(async () => {
+            requests++
+            return response(['chat'])
+        })
+        assert.equal(requests, 1, flag)
+        assert.deepEqual(
+            h.registrations.get('relay')?.models?.map((model) => model.id),
+            ['chat'],
+        )
+    }
+
+    process.env.PI_OFFLINE = 'yes'
+    let requests = 0
+    await h.load(
+        async () => {
+            requests++
+            return response(['network'])
+        },
+        100,
+        { cacheTtlMs: 0 },
+    )
+    assert.equal(requests, 0)
+    assert.deepEqual(
+        h.registrations.get('relay')?.models?.map((model) => model.id),
+        ['chat'],
+    )
+})
+
+test('多页大目录写入的缓存可离线读回，不被单页上限裁掉', async (t) => {
+    const h = await harness(t)
+    await h.config({ relay: provider })
+    const id = (page: number, index: number) =>
+        `chat-${page}-${index}-${'x'.repeat(480)}`
+    let requests = 0
+    await h.load(async () => {
+        const page = requests++
+        return Response.json({
+            data: Array.from({ length: 2_500 }, (_, index) => ({
+                id: id(page, index),
+            })),
+            ...(page === 0 ? { next_cursor: '2' } : {}),
+        })
+    }, 30_000)
+    assert.equal(requests, 2)
+    const expected = h.registrations.get('relay')?.models?.length
+    assert.equal(expected, 5_000)
+    const cache = await h.cache()
+    assert.ok((cache[0]?.length ?? 0) > 2 * 1024 * 1024)
+
+    await h.load(
+        async () => {
+            throw new Error('offline')
+        },
+        100,
+        { offline: true },
+    )
+    assert.equal(h.registrations.get('relay')?.models?.length, 5_000)
+    assert.deepEqual(h.warnings, [])
+})
