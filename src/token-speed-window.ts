@@ -8,12 +8,14 @@ const COMPACTION_THRESHOLD = 5_000
 export class SlidingWindow {
     private readonly events: { time: number; tokens: number }[] = []
     private windowStartIndex = 0
+    private activeTokens = 0
 
     record(tokens: number, now: number): void {
         if (!Number.isFinite(tokens) || tokens <= 0) return
         // 未被选为显示来源的窗口也必须定期清理。
         this.prune(now)
         this.events.push({ time: now, tokens })
+        this.activeTokens += tokens
     }
 
     /** 窗口内没有样本时由调用方决定回退值，而不是把停顿显示成 0。 */
@@ -26,16 +28,14 @@ export class SlidingWindow {
         this.prune(now)
         if (this.windowStartIndex >= this.events.length) return 0
 
-        let tokens = 0
-        for (let i = this.windowStartIndex; i < this.events.length; i++) {
-            tokens += this.events[i]!.tokens
-        }
         let spanStart = this.events[this.windowStartIndex]!.time
         const lastTime = this.events[this.events.length - 1]!.time
         if (spanStart === lastTime && this.windowStartIndex > 0) {
             spanStart = this.events[this.windowStartIndex - 1]!.time
         }
-        return (tokens * 1_000) / Math.max(now - spanStart, MIN_SPAN_MS)
+        return (
+            (this.activeTokens * 1_000) / Math.max(now - spanStart, MIN_SPAN_MS)
+        )
     }
 
     private prune(now: number): void {
@@ -44,8 +44,10 @@ export class SlidingWindow {
             this.windowStartIndex < this.events.length &&
             this.events[this.windowStartIndex]!.time < windowStart
         ) {
+            this.activeTokens -= this.events[this.windowStartIndex]!.tokens
             this.windowStartIndex++
         }
+        if (this.windowStartIndex === this.events.length) this.activeTokens = 0
         if (this.windowStartIndex >= COMPACTION_THRESHOLD) {
             // 保留前一个事件，压缩后仍能计算批量到达前的停顿。
             this.events.splice(0, this.windowStartIndex - 1)

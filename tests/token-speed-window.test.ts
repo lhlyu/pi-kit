@@ -46,6 +46,17 @@ test('持续记录但不读取的备用窗口也会清理，内存不随响应�
     assert.equal(window.getTps(40_000), 10_000 / 10_001)
 })
 
+test('相邻窗口部分重叠时只扣除过期样本，重复读取不影响结果', () => {
+    const window = new SlidingWindow()
+    window.record(3, 0)
+    window.record(7, 400)
+    window.record(11, 900)
+    window.record(13, 1_300)
+    assert.equal(window.getTps(1_300), 31_000 / 900)
+    assert.equal(window.getTps(1_300), 31_000 / 900)
+    assert.equal(window.getTps(1_500), 40)
+})
+
 test('无效或零 token 数不污染窗口', () => {
     const window = new SlidingWindow()
     for (const tokens of [NaN, Infinity, -1, 0]) window.record(tokens, 0)
