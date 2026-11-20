@@ -790,6 +790,47 @@ test('异常分页、错误信封和过滤后空列表不覆盖缓存或删除�
     )
 })
 
+test('远程 HTTP 默认拦截启动和强制刷新，本地 HTTP 可正常发现', async (t) => {
+    const h = await harness(t)
+    await h.config({
+        relay: { ...provider, modelsUrl: 'http://relay.example/models' },
+        local: { ...provider, baseUrl: 'http://127.0.0.1:8080/v1' },
+    })
+    const urls: string[] = []
+    await h.load(async (url) => {
+        urls.push(String(url))
+        return response(['chat'])
+    })
+    const refresh = h.registrations.get('relay')?.refreshModels
+    assert.ok(refresh)
+    await assert.rejects(
+        refresh({
+            allowNetwork: true,
+            force: true,
+            signal: new AbortController().signal,
+            publish: async () => true,
+        }),
+        /HTTPS/,
+    )
+    assert.deepEqual(urls, ['http://127.0.0.1:8080/v1/models'])
+    assert.match(h.warnings[0]!, /allowInsecureHttp/)
+})
+
+test('调试模式不把底层异常或无效响应中的凭证写入警告', async (t) => {
+    const h = await harness(t)
+    await h.config({ relay: provider })
+    for (const request of [
+        async () => {
+            throw new TypeError('Authorization: private-key')
+        },
+        async () => new Response('private-key'),
+    ]) {
+        await h.load(request, 100, { debug: true })
+        assert.equal(h.warnings.length, 1)
+        assert.doesNotMatch(h.warnings[0]!, /private-key/)
+    }
+})
+
 test('同义 headers 顺序变化不误判缓存失效', async (t) => {
     const h = await harness(t)
     await h.config({
@@ -1036,6 +1077,8 @@ test('移除或改名 Provider 后清理旧缓存', async (t) => {
     const dir = join(h.agentDir, 'pi-kit/cache/providers')
     assert.equal((await readdir(dir)).length, 2)
 
+    const unrelated = join(dir, 'notes.json')
+    await writeFile(unrelated, 'keep')
     await h.config({ a: provider })
     await h.load(
         async () => {
@@ -1044,7 +1087,8 @@ test('移除或改名 Provider 后清理旧缓存', async (t) => {
         100,
         { cacheTtlMs: 60_000 },
     )
-    assert.equal((await readdir(dir)).length, 1)
+    assert.equal((await readdir(dir)).length, 2)
+    assert.equal(await readFile(unrelated, 'utf8'), 'keep')
     assert.deepEqual([...h.registrations.keys()], ['a'])
 })
 
@@ -1107,6 +1151,20 @@ test('游标和同源链接自动翻页，跨源链接拒绝且不泄露鉴权',
         ['a'],
     )
     assert.match(h.warnings[0]!, /使用上次成功缓存/)
+})
+
+test('分页游标重复时立即停止并保留旧缓存', async (t) => {
+    const h = await harness(t)
+    await h.config({ relay: provider })
+    await h.load(async () => response(['cached']))
+    let calls = 0
+    await h.load(async () => {
+        calls++
+        return Response.json({ data: [{ id: 'partial' }], next_cursor: 'same' })
+    })
+    assert.equal(calls, 2)
+    assert.equal(h.registrations.get('relay')?.models?.[0]?.id, 'cached')
+    assert.match(h.warnings[0]!, /分页链接重复/)
 })
 
 test('Anthropic 分页按 after_id 续页，末页停止后合并全部模型', async (t) => {
@@ -1177,26 +1235,52 @@ test('PI_OFFLINE 只认 1/true/yes，其他值仍允许联网刷新', async (t) 
     )
 })
 
-test('多页大目录写入的缓存可离线读回，不被单页上限裁掉', async (t) => {
+test('读缓存时严格校验 ID 并对有效目录过滤、排序、去重', async (t) => {
+    const h = await harness(t)
+    await h.config({ relay: provider })
+    await h.load(async () => response(['cached']))
+    const dir = join(h.agentDir, 'pi-kit/cache/providers')
+    const path = join(dir, (await readdir(dir))[0]!)
+    const cache = JSON.parse(await readFile(path, 'utf8'))
+    const cases = [
+        {
+            ids: ['z', 'typesafe/jev', 'text-embedding-3-small', 'a', 'z'],
+            expected: ['a', 'z'],
+        },
+        { ids: ['valid', 42], expected: [] },
+    ]
+    for (const { ids, expected } of cases) {
+        await writeFile(path, JSON.stringify({ ...cache, ids }))
+        await h.load(async () => assert.fail('离线请求'), 100, {
+            offline: true,
+        })
+        assert.deepEqual(
+            h.registrations.get('relay')?.models?.map((m) => m.id),
+            expected,
+        )
+    }
+})
+
+test('多页多字节目录写入的缓存即使超过 8 MiB 也可离线读回', async (t) => {
     const h = await harness(t)
     await h.config({ relay: provider })
     const id = (page: number, index: number) =>
-        `chat-${page}-${index}-${'x'.repeat(480)}`
+        `chat-${page}-${index}-${'模'.repeat(480)}`
     let requests = 0
     await h.load(async () => {
         const page = requests++
         return Response.json({
-            data: Array.from({ length: 2_500 }, (_, index) => ({
+            data: Array.from({ length: 1_250 }, (_, index) => ({
                 id: id(page, index),
             })),
-            ...(page === 0 ? { next_cursor: '2' } : {}),
+            ...(page < 4 ? { next_cursor: String(page + 2) } : {}),
         })
     }, 30_000)
-    assert.equal(requests, 2)
+    assert.equal(requests, 5)
     const expected = h.registrations.get('relay')?.models?.length
-    assert.equal(expected, 5_000)
+    assert.equal(expected, 6_250)
     const cache = await h.cache()
-    assert.ok((cache[0]?.length ?? 0) > 2 * 1024 * 1024)
+    assert.ok(Buffer.byteLength(cache[0]!) > 8 * 1024 * 1024)
 
     await h.load(
         async () => {
@@ -1205,6 +1289,6 @@ test('多页大目录写入的缓存可离线读回，不被单页上限裁掉',
         100,
         { offline: true },
     )
-    assert.equal(h.registrations.get('relay')?.models?.length, 5_000)
+    assert.equal(h.registrations.get('relay')?.models?.length, expected)
     assert.deepEqual(h.warnings, [])
 })

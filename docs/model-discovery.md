@@ -10,11 +10,11 @@
 - **鉴权**：优先使用 `/login` 保存的凭证，否则使用 `apiKey`；支持环境变量和自定义 `headers`，不支持 `!command`。无鉴权的本地服务可填占位密钥。
 - **缓存**：默认有效期 5 分钟，可用 `cacheTtlMinutes` 调整；设为 `0` 表示每次刷新都联网。
 
-不要同时配置 `models` 或 `oauth`。发现请求会携带凭证，请使用可信地址并优先选择 HTTPS。
+不要同时配置 `models` 或 `oauth`。发现请求会携带凭证。远程发现地址默认要求 HTTPS，`localhost`、`127.0.0.1` 和 `[::1]` 可直接使用 HTTP。可信内网确需明文发现时，在对应 Provider 中设置 `"allowInsecureHttp": true`。
 
 接口需返回 OpenAI 风格的列表，例如 `{"data":[{"id":"my-chat-model"}]}`；支持同源分页，明确的非聊天模型会被过滤。
 
-`discoverModels`、`modelsUrl`、`cacheTtlMinutes` 是扩展字段，编辑器的官方 schema 可能提示未知字段，不影响加载。
+`discoverModels`、`modelsUrl`、`allowInsecureHttp`、`cacheTtlMinutes` 是扩展字段，编辑器的官方 schema 可能提示未知字段，不影响加载。
 
 ## 模型能力
 

@@ -13,21 +13,21 @@ import { parse } from 'jsonc-parser'
 import type { ParseError } from 'jsonc-parser'
 import writeFileAtomic from 'write-file-atomic'
 import Type from 'typebox'
-import type { TSchema } from 'typebox'
 import Value from 'typebox/value'
 import {
     MAX_MODELS,
+    MAX_MODEL_ID_LENGTH,
+    isChatId,
     matchModels,
     modelId,
-    parseModelList,
     parseModelPage,
 } from './model-catalog.ts'
 import type { ModelPage } from './model-catalog.ts'
 import type { BuiltinCatalog } from './builtin-catalog.ts'
 
 const MAX_PAGE_BYTES = 2 * 1024 * 1024
-// 完整目录可能跨多页，缓存上限需覆盖 MAX_MODELS 个不超 512 字符的 ID。
-const MAX_CACHE_BYTES = 8 * 1024 * 1024
+// JSON 转义最多占每个 UTF-16 码元 6 字节，另计引号、逗号和缓存元数据。
+const MAX_CACHE_BYTES = MAX_MODELS * (MAX_MODEL_ID_LENGTH * 6 + 3) + 1_024
 const MAX_PAGES = 20
 const DEFAULT_CACHE_TTL_MINUTES = 5
 const httpUrl = Type.Refine(
@@ -49,6 +49,7 @@ const httpUrl = Type.Refine(
 const configSchema = Type.Object({
     baseUrl: httpUrl,
     modelsUrl: Type.Optional(httpUrl),
+    allowInsecureHttp: Type.Optional(Type.Boolean()),
     api: Type.Union([
         Type.Literal('openai-completions'),
         Type.Literal('openai-responses'),
@@ -78,15 +79,20 @@ const cacheSchema = Type.Object({
     ids: Type.Array(modelId, { minItems: 1, maxItems: MAX_MODELS }),
 })
 
-function parseSchema<T>(schema: TSchema, value: unknown): T {
+// 此类消息可进入诊断，只使用固定文案和 schema 中已知的字段名。
+class DiscoveryError extends Error {}
+
+function parseSchema<T>(
+    schema: typeof rootSchema | typeof configSchema,
+    value: unknown,
+): T {
     if (Value.Check(schema, value)) return value as T
-    // TypeBox 的 Parse 只给出 "Parse"；用错误路径生成可读的 debug 细节。
-    const errors: string[] = []
     for (const error of Value.Errors(schema, value)) {
-        errors.push(`${error.instancePath || '/'} ${error.message}`)
-        if (errors.length === 3) break
+        const field = error.instancePath.split('/')[1]
+        if (field && Object.hasOwn(schema.properties, field))
+            throw new DiscoveryError(`配置字段 ${field} 无效`)
     }
-    throw new Error(errors.join('；') || '配置格式无效')
+    throw new DiscoveryError('配置格式无效')
 }
 
 export interface DiscoveryOptions {
@@ -112,7 +118,7 @@ export function parseModelsConfig(content: string): unknown {
         allowTrailingComma: false,
     })
     // jsonc-parser 默认容错；有任何语法错误都不能接受恢复出的部分配置。
-    if (errors.length) throw new Error('models.json 语法无效')
+    if (errors.length) throw new DiscoveryError('models.json 语法无效')
     return result
 }
 
@@ -132,7 +138,8 @@ function modelsUrlFor(config: DiscoveryConfig): string {
     if (config.modelsUrl) return config.modelsUrl
     const url = new URL(config.baseUrl)
     // 带查询参数的聊天 URL 不能靠字符串拼接推导发现 URL。
-    if (url.search) throw new Error('baseUrl 带查询参数时需要指定 modelsUrl')
+    if (url.search)
+        throw new DiscoveryError('baseUrl 带查询参数时需要指定 modelsUrl')
     url.pathname = `${url.pathname.replace(/\/+$/, '')}/models`
     return url.href
 }
@@ -167,12 +174,12 @@ async function readResponseBody(
     }
     if (response.status !== 200 || !response.body) {
         void response.body?.cancel().catch(() => {})
-        throw new Error('模型发现 HTTP 响应无效')
+        throw new DiscoveryError('模型发现 HTTP 响应无效')
     }
     const declared = Number(response.headers.get('content-length'))
     if (Number.isFinite(declared) && declared > MAX_PAGE_BYTES) {
         void response.body.cancel().catch(() => {})
-        throw new Error('模型列表过大')
+        throw new DiscoveryError('模型列表过大')
     }
     const reader = response.body.getReader()
     const chunks: Uint8Array[] = []
@@ -182,7 +189,8 @@ async function readResponseBody(
             const { done, value } = await reader.read()
             if (done) break
             length += value.length
-            if (length > MAX_PAGE_BYTES) throw new Error('模型列表过大')
+            if (length > MAX_PAGE_BYTES)
+                throw new DiscoveryError('模型列表过大')
             chunks.push(value)
         }
         signal.throwIfAborted()
@@ -206,8 +214,11 @@ function nextUrl(
     if ('url' in next) {
         const url = new URL(next.url, base)
         // 鉴权头只发给配置的目录地址，禁止被分页链接带到其他源。
-        if (url.origin !== base.origin) throw new Error('模型分页地址跨域')
-        if (url.username || url.password) throw new Error('模型分页地址无效')
+        if (url.origin !== base.origin)
+            throw new DiscoveryError('模型分页地址跨域')
+        if (url.username || url.password)
+            throw new DiscoveryError('模型分页地址无效')
+        url.hash = ''
         return url.href
     }
     const url = new URL(current)
@@ -223,8 +234,11 @@ async function fetchModels(
     nonChatIds: ReadonlySet<string>,
 ): Promise<string[]> {
     const ids = new Set<string>()
-    let current = url
+    let current = new URL(url).href
+    const visited = new Set<string>()
     for (let page = 0; page < MAX_PAGES; page++) {
+        if (visited.has(current)) throw new DiscoveryError('模型分页链接重复')
+        visited.add(current)
         const response = await request(current, {
             headers,
             signal,
@@ -235,14 +249,15 @@ async function fetchModels(
             nonChatIds,
         )
         for (const id of parsed.ids) ids.add(id)
-        if (ids.size > MAX_MODELS) throw new Error('模型数量超过上限')
+        if (ids.size > MAX_MODELS) throw new DiscoveryError('模型数量超过上限')
         if (!parsed.next) {
-            if (!ids.size) throw new Error('没有可用聊天模型，保留上次成功缓存')
+            if (!ids.size)
+                throw new DiscoveryError('没有可用聊天模型，保留上次成功缓存')
             return [...ids].sort()
         }
         current = nextUrl(current, parsed.next)
     }
-    throw new Error('模型分页过多')
+    throw new DiscoveryError('模型分页过多')
 }
 
 function fingerprintFor(config: DiscoveryConfig, modelsUrl: string): string {
@@ -267,18 +282,21 @@ function cacheFileFor(name: string): string {
 async function readCache(
     path: string,
     fingerprint: string,
+    nonChatIds: ReadonlySet<string>,
 ): Promise<{ ids: string[]; checkedAt: number } | undefined> {
     try {
-        if ((await stat(path)).size > MAX_CACHE_BYTES) return undefined
-        const value = Value.Parse(
-            cacheSchema,
-            JSON.parse(await readFile(path, 'utf8')) as unknown,
+        const file = await stat(path)
+        if (!file.isFile() || file.size > MAX_CACHE_BYTES) return undefined
+        const value: unknown = JSON.parse(await readFile(path, 'utf8'))
+        if (
+            !Value.Check(cacheSchema, value) ||
+            value.fingerprint !== fingerprint
         )
-        if (value.fingerprint !== fingerprint) return undefined
-        return {
-            ids: parseModelList({ data: value.ids.map((id) => ({ id })) }),
-            checkedAt: value.checkedAt,
-        }
+            return undefined
+        const ids = [
+            ...new Set(value.ids.filter((id) => isChatId(id, nonChatIds))),
+        ].sort()
+        return ids.length ? { ids, checkedAt: value.checkedAt } : undefined
     } catch {
         return undefined
     }
@@ -311,7 +329,7 @@ async function cleanupCache(
 ): Promise<void> {
     try {
         for (const name of await readdir(dir)) {
-            if (!name.endsWith('.json') || keep.has(name)) continue
+            if (!/^[0-9a-f]{64}\.json$/.test(name) || keep.has(name)) continue
             try {
                 await rm(join(dir, name), { force: true })
             } catch {
@@ -324,19 +342,18 @@ async function cleanupCache(
 }
 
 function describeError(error: unknown): string {
-    const message =
-        error instanceof Error
-            ? `${error.name}: ${error.message}`
-            : String(error)
-    return message.replace(/[\p{Cc}\p{Cf}]/gu, ' ').slice(0, 200)
+    if (error instanceof DiscoveryError) return error.message
+    if (error instanceof SyntaxError) return 'JSON 语法无效'
+    if (error instanceof DOMException && error.name === 'TimeoutError')
+        return '操作超时'
+    return '底层调用失败'
 }
 
 function isLoopbackHost(hostname: string): boolean {
     return (
         hostname === 'localhost' ||
         hostname === '127.0.0.1' ||
-        hostname === '[::1]' ||
-        hostname.endsWith('.localhost')
+        hostname === '[::1]'
     )
 }
 
@@ -361,7 +378,7 @@ export async function discoverProviders(
         error?: unknown,
     ): void => {
         warn(
-            `${label}：${message}${debug && error !== undefined ? `（${describeError(error)}）` : ''}`,
+            `${label}：${message}${(debug || error instanceof DiscoveryError) && error !== undefined ? `（${describeError(error)}）` : ''}`,
         )
     }
 
@@ -421,7 +438,7 @@ export async function discoverProviders(
                     !/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(name) ||
                     reserved.has(name)
                 )
-                    throw new Error('Provider 名称无效或冲突')
+                    throw new DiscoveryError('Provider 名称无效或冲突')
                 const config = parseSchema<DiscoveryConfig>(configSchema, raw)
                 // 原生 /model 会先解析认证；拒绝不可取消的同步命令，不能等进入刷新回调才检查。
                 if (
@@ -430,12 +447,20 @@ export async function discoverProviders(
                         ...Object.values(config.headers ?? {}),
                     ].some((value) => value?.startsWith('!'))
                 )
-                    throw new Error('发现不执行鉴权命令')
+                    throw new DiscoveryError('发现不执行鉴权命令')
                 const modelsUrl = modelsUrlFor(config)
+                const endpoint = new URL(modelsUrl)
+                const remoteHttp =
+                    endpoint.protocol === 'http:' &&
+                    !isLoopbackHost(endpoint.hostname)
                 const fingerprint = fingerprintFor(config, modelsUrl)
                 const path = join(cacheDir, cacheFileFor(name))
                 const registration = registrationFor(config)
-                const cached = await readCache(path, fingerprint)
+                const cached = await readCache(
+                    path,
+                    fingerprint,
+                    catalog.nonChatIds,
+                )
                 const cacheTtlMs =
                     options.cacheTtlMs ??
                     (config.cacheTtlMinutes ?? DEFAULT_CACHE_TTL_MINUTES) *
@@ -466,6 +491,10 @@ export async function discoverProviders(
                     )
                         return models()
 
+                    if (remoteHttp && !config.allowInsecureHttp)
+                        throw new DiscoveryError(
+                            '远程模型发现需要 HTTPS，可信内网可显式设置 allowInsecureHttp',
+                        )
                     const authSignal = AbortSignal.any([
                         signal,
                         AbortSignal.timeout(authTimeoutMs),
@@ -492,15 +521,8 @@ export async function discoverProviders(
                         )?.auth
                     }
                     authSignal.throwIfAborted()
-                    if (!auth) throw new Error('原生认证不可用')
-                    if (
-                        new URL(modelsUrl).protocol === 'http:' &&
-                        !isLoopbackHost(new URL(modelsUrl).hostname) &&
-                        (auth.apiKey !== undefined ||
-                            Object.keys(auth.headers ?? {}).some((key) =>
-                                /authorization|api[-_]?key|token/i.test(key),
-                            ))
-                    )
+                    if (!auth) throw new DiscoveryError('原生认证不可用')
+                    if (remoteHttp)
                         warnFailure(
                             label,
                             '模型发现使用明文 HTTP，凭证可能被窃听',
@@ -538,8 +560,9 @@ export async function discoverProviders(
                     return models()
                 }
                 try {
-                    await refresh(true)
+                    registration.models = await refresh(true)
                 } catch (error) {
+                    registration.models = models()
                     warnFailure(
                         label,
                         ids
@@ -548,7 +571,6 @@ export async function discoverProviders(
                         error,
                     )
                 }
-                registration.models = models()
                 registration.refreshModels = async (context) => {
                     try {
                         return await refresh(
@@ -557,10 +579,16 @@ export async function discoverProviders(
                             context.signal,
                             options.getAuth,
                         )
-                    } catch {
+                    } catch (error) {
                         // 保留已发布目录，并交由 /model 的原生 UI 报错；不泄露原始响应或凭证。
                         context.signal.throwIfAborted()
-                        throw new Error('模型发现失败，保留上次成功目录')
+                        const detail =
+                            error instanceof DiscoveryError
+                                ? `（${error.message}）`
+                                : ''
+                        throw new Error(
+                            `模型发现失败，保留上次成功目录${detail}`,
+                        )
                     }
                 }
                 pi.registerProvider(name, registration)

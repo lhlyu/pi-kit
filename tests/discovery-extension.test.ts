@@ -153,6 +153,7 @@ for (const startupFails of [false, true]) {
                 providers: {
                     relay: {
                         baseUrl: `${startupFails ? 'http' : 'https'}://relay.example/v1`,
+                        allowInsecureHttp: startupFails,
                         api: 'openai-completions',
                         apiKey: 'configured',
                         discoverModels: true,

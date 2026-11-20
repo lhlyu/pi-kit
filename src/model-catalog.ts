@@ -5,15 +5,18 @@ import type { TSchema } from 'typebox'
 import Value from 'typebox/value'
 
 export const MAX_MODELS = 10_000
+export const MAX_MODEL_ID_LENGTH = 512
 // 内置目录没有该模型时，按现代长上下文模型给一个宽松默认值，避免误截断。
 const DEFAULT_CONTEXT_WINDOW = 1_050_000
 const DEFAULT_MAX_TOKENS = 128_000
 const invalidModelIdChars = /[\p{Cc}\p{Cf}]/u
 export const modelId = Type.Refine(
-    Type.String({ minLength: 1, maxLength: 512 }),
+    Type.String({ minLength: 1, maxLength: MAX_MODEL_ID_LENGTH }),
     // TypeBox 的长度按字素簇计算，补充 UTF-16 上限，避免单个字素簇绕过 512 字符限制。
     (id) =>
-        id.length <= 512 && id === id.trim() && !invalidModelIdChars.test(id),
+        id.length <= MAX_MODEL_ID_LENGTH &&
+        id === id.trim() &&
+        !invalidModelIdChars.test(id),
     () => '模型 ID 无效',
 )
 const nullableCursor = Type.Optional(Type.Union([Type.String(), Type.Null()]))
@@ -73,11 +76,12 @@ const nonChatTypes = new Set([
 const knownNonChat =
     /^(?:bge[-/]|baai\/bge|voyage[-/]|voyageai\/|jina-(?:embed|rerank)|nomic-(?:embed|ai\/nomic-embed)|mixedbread-ai\/|mxbai-embed|snowflake-arctic-embed|sentence-transformers\/|intfloat\/|text-embedding|text-similarity|text-search|embed-(?:english|multilingual)|e5-|gte-|cohere\/(?:embed|rerank)|rerank-|(?:qwen\/)?qwen3-(?:embedding|reranker)|llama-embed|nemotron-embed|whisper(?:-|$)|tts-|gpt-image-|dall-e-|omni-moderation|text-moderation|gpt-4o(?:-mini)?-(?:transcribe|tts)|gpt-3\.5-turbo-instruct(?:-|$)|stable-diffusion|stability-ai\/|black-forest-labs\/|flux[.-]|seedream|seedance|imagen|recraft|ideogram|sora(?:-|$)|veo-|kling)/i
 
-function isChatId(id: string, nonChatIds: ReadonlySet<string>): boolean {
+export function isChatId(id: string, nonChatIds: ReadonlySet<string>): boolean {
     if (nonChatIds.has(id)) return false
     if (knownNonChat.test(id)) return false
     // 带厂商前缀时按最后一段再判断一次，例如 openai/text-embedding-3-large。
-    return !knownNonChat.test(id.split('/').at(-1) ?? id)
+    const slash = id.lastIndexOf('/')
+    return slash < 0 || !knownNonChat.test(id.slice(slash + 1))
 }
 
 function nextPageOf(page: {
