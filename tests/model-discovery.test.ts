@@ -255,8 +255,8 @@ test('精确匹配内置元数据，但不继承原厂协议、端点、鉴权�
         api: 'openai-completions',
         reasoning: false,
         input: ['text'],
-        contextWindow: 32_768,
-        maxTokens: 4_096,
+        contextWindow: 1_050_000,
+        maxTokens: 128_000,
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     })
 })

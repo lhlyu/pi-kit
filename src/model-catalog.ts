@@ -5,6 +5,9 @@ import type { TSchema } from 'typebox'
 import Value from 'typebox/value'
 
 export const MAX_MODELS = 10_000
+// 内置目录没有该模型时，按现代长上下文模型给一个宽松默认值，避免误截断。
+const DEFAULT_CONTEXT_WINDOW = 1_050_000
+const DEFAULT_MAX_TOKENS = 128_000
 const invalidModelIdChars = /[\p{Cc}\p{Cf}]/u
 export const modelId = Type.Refine(
     Type.String({ minLength: 1, maxLength: 512 }),
@@ -253,8 +256,8 @@ export function matchModels(
                         cacheWrite: 0,
                     },
                 ),
-                contextWindow: model?.contextWindow ?? 32_768,
-                maxTokens: model?.maxTokens ?? 4_096,
+                contextWindow: model?.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
+                maxTokens: model?.maxTokens ?? DEFAULT_MAX_TOKENS,
                 ...(compat !== undefined ? { compat } : {}),
             }
         })

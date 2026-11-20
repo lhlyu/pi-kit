@@ -190,9 +190,9 @@ test('relay 常见厂商前缀、点横线与日期后缀沿用内置能力', ()
             | undefined
     for (const id of ids.slice(0, 5)) {
         assert.notEqual(chatInfo(id)?.name, id, id)
-        assert.ok((chatInfo(id)?.contextWindow ?? 0) > 32_768, id)
+        assert.ok((chatInfo(id)?.contextWindow ?? 0) > 128_000, id)
     }
-    assert.equal(chatInfo('unknown-vendor/model-x')?.contextWindow, 32_768)
+    assert.equal(chatInfo('unknown-vendor/model-x')?.contextWindow, 1_050_000)
     assert.equal(chatInfo('unknown-vendor/model-x')?.reasoning, false)
 })
 
