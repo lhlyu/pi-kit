@@ -13,7 +13,7 @@ Pi Coding Agent 的模型自动发现与终端状态栏扩展。
 
 ## 安装
 
-需要 Node.js ≥ 22.19.0、Pi Coding Agent ≥ 1.3.0。
+需要 Node.js ≥ 22.19.0、Pi Coding Agent ≥ 1.6.0。
 
 ```bash
 pi install npm:@lhlyu/pi-kit
