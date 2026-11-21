@@ -2,7 +2,12 @@ import type {
     ExtensionAPI,
     ExtensionContext,
 } from '@earendil-works/pi-coding-agent'
-import { renderStatus, RoundStats } from './status.ts'
+import {
+    stripTerminalSequences,
+    truncateToWidth,
+    visibleWidth,
+} from '@earendil-works/pi-tui'
+import { formatDuration, renderStatus, RoundStats } from './status.ts'
 
 const STATUS_KEY = 'pi-kit:stats'
 // 按需合并到约 30 FPS，不启动持续的高频刷新循环。
@@ -12,6 +17,54 @@ const RENDER_INTERVAL_MS = 33
 const WAKE_GRACE_MS = 5_000
 const BACKGROUND_STARTED_EVENT = 'subagent:async-started'
 const BACKGROUND_COMPLETE_EVENT = 'subagent:async-complete'
+const TOOL_LABEL_LIMIT = 24
+const TOOL_PREVIEW_LENGTH = 512
+const RUNNING_PREFIX = '正在运行 '
+const ACTIVITY_SEPARATOR = ' │ '
+
+interface Activity {
+    label: string
+    startedAt: number
+}
+
+function truncateLabel(text: string, width: number): string {
+    return stripTerminalSequences(truncateToWidth(text, width, '…'))
+}
+
+function compactToolLabel(text: string): string {
+    const preview = stripTerminalSequences(text.slice(0, TOOL_PREVIEW_LENGTH))
+        .replace(/[\p{Bidi_Control}\p{Cs}]/gu, '')
+        .replace(/[\s\p{Cc}]+/gu, ' ')
+        .trim()
+    if (!preview) return ''
+    return truncateLabel(
+        text.length > TOOL_PREVIEW_LENGTH ? `${preview}…` : preview,
+        TOOL_LABEL_LIMIT,
+    )
+}
+
+function appendActivity(
+    metrics: string,
+    activity: Activity,
+    now: number,
+    isTool: boolean,
+): string {
+    const duration = ` · ${formatDuration(now - activity.startedAt)}`
+    const columns = process.stdout.columns || Number(process.env.COLUMNS) || 80
+    const available =
+        columns - visibleWidth(metrics + ACTIVITY_SEPARATOR + duration)
+    if (available < 1) return metrics
+
+    const prefix =
+        isTool &&
+        available >=
+            visibleWidth(RUNNING_PREFIX) +
+                Math.min(5, visibleWidth(activity.label))
+            ? RUNNING_PREFIX
+            : ''
+    const label = truncateLabel(prefix + activity.label, available)
+    return `${metrics}${ACTIVITY_SEPARATOR}${label}${duration}`
+}
 
 export default function piKit(pi: ExtensionAPI): void {
     let stats = new RoundStats()
@@ -22,6 +75,8 @@ export default function piKit(pi: ExtensionAPI): void {
     let lastRender = -Infinity
     let isShutdown = false
     let agentActive = false
+    let phase: Activity | undefined
+    const runningTools = new Map<string, Activity>()
     // pi-subagents 用会话文件路径（存在时）标识会话，状态栏同时记录 ID 和路径。
     let sessionIdentities = new Set<string>()
     let lastCtx: ExtensionContext | undefined
@@ -59,6 +114,7 @@ export default function piKit(pi: ExtensionAPI): void {
 
     const finishRound = (ctx: ExtensionContext, at = performance.now()) => {
         stopTimer()
+        phase = undefined
         stats.finish(at)
         render(ctx, true)
     }
@@ -94,7 +150,15 @@ export default function piKit(pi: ExtensionAPI): void {
             return
         backgroundRuns.add(data.id)
         clearWakeTimer()
-        if (stats.isRunning && lastCtx) render(lastCtx, true)
+        if (stats.isRunning && lastCtx) {
+            if (!agentActive) {
+                phase ??= {
+                    label: '等待后台任务',
+                    startedAt: performance.now(),
+                }
+            }
+            render(lastCtx, true)
+        }
     }
 
     const backgroundComplete = (payload: unknown) => {
@@ -109,6 +173,7 @@ export default function piKit(pi: ExtensionAPI): void {
             render(ctx, true)
             return
         }
+        if (!agentActive) phase = undefined
 
         // 子任务完成后父任务通常会被唤醒并继续；总耗时不应在此期间断掉。
         if (data.triggerTurn !== false) {
@@ -166,10 +231,13 @@ export default function piKit(pi: ExtensionAPI): void {
             return
         }
         cancelPendingRender()
-        ctx.ui.setStatus(
-            STATUS_KEY,
-            renderStatus(stats.snapshot(now), ctx.ui.theme),
-        )
+        const metrics = renderStatus(stats.snapshot(now), ctx.ui.theme)
+        const tool = [...runningTools.values()].at(-1)
+        const activity = tool ?? phase
+        const status = activity
+            ? appendActivity(metrics, activity, now, tool !== undefined)
+            : metrics
+        ctx.ui.setStatus(STATUS_KEY, status)
         lastRender = now
     }
 
@@ -180,7 +248,9 @@ export default function piKit(pi: ExtensionAPI): void {
             stopTimer()
             clearWakeTimer()
             backgroundRuns.clear()
+            runningTools.clear()
             agentActive = false
+            phase = undefined
             const identities = new Set<string>()
             try {
                 const manager = ctx.sessionManager as {
@@ -206,6 +276,7 @@ export default function piKit(pi: ExtensionAPI): void {
         safely((_event, ctx) => {
             lastCtx = ctx
             agentActive = true
+            phase = undefined
             clearWakeTimer()
             if (ctx.mode !== 'tui' || isShutdown) return
             // 自动重试仍属于同一轮，保留统计和已有计时器。
@@ -229,8 +300,10 @@ export default function piKit(pi: ExtensionAPI): void {
         'turn_start',
         safely((_event, ctx) => {
             // 无流式内容时，message_start 可能直到请求完成才派发。
-            if (!isActive(ctx)) return
-            stats.prepareMessage(performance.now())
+            if (!agentActive || !isActive(ctx)) return
+            const now = performance.now()
+            stats.prepareMessage(now)
+            phase = { label: '等待模型响应', startedAt: now }
             render(ctx, true)
         }),
     )
@@ -238,7 +311,7 @@ export default function piKit(pi: ExtensionAPI): void {
     pi.on(
         'message_update',
         safely((payload, ctx) => {
-            if (!isActive(ctx)) return
+            if (!agentActive || !isActive(ctx)) return
             const event = payload?.assistantMessageEvent
             if (!event || typeof event !== 'object') return
             const now = performance.now()
@@ -252,6 +325,9 @@ export default function piKit(pi: ExtensionAPI): void {
                         stats.recordDelta(now, event.delta)
                     break
             }
+            if (hasDelta && phase?.label !== '模型生成中') {
+                phase = { label: '模型生成中', startedAt: now }
+            }
             const usageUpdated =
                 'partial' in event
                     ? stats.recordUsage(event.partial?.usage?.output, now)
@@ -264,9 +340,44 @@ export default function piKit(pi: ExtensionAPI): void {
         'message_end',
         safely((event, ctx) => {
             const message = event?.message
-            if (!isActive(ctx) || message?.role !== 'assistant') return
+            if (!agentActive || !isActive(ctx) || message?.role !== 'assistant')
+                return
             // 按消息校准，避免多次工具调用后的累计 usage 被重复计算。
+            phase = undefined
             stats.endMessage(message.usage?.output, performance.now())
+            render(ctx, true)
+        }),
+    )
+
+    pi.on(
+        'tool_execution_start',
+        safely((event, ctx) => {
+            if (
+                !agentActive ||
+                !isActive(ctx) ||
+                typeof event?.toolCallId !== 'string' ||
+                typeof event.toolName !== 'string'
+            )
+                return
+            const { toolCallId, toolName, args } = event
+            const command = asRecord(args)?.command
+            const target =
+                toolName === 'bash' && typeof command === 'string'
+                    ? compactToolLabel(command)
+                    : ''
+            runningTools.set(toolCallId, {
+                label: target || compactToolLabel(toolName) || '工具',
+                startedAt: performance.now(),
+            })
+            render(ctx, true)
+        }),
+    )
+
+    pi.on(
+        'tool_execution_end',
+        safely((event, ctx) => {
+            if (!isActive(ctx) || !runningTools.delete(event?.toolCallId))
+                return
             render(ctx, true)
         }),
     )
@@ -278,11 +389,19 @@ export default function piKit(pi: ExtensionAPI): void {
         safely((_event, ctx) => {
             lastCtx = ctx
             agentActive = false
+            runningTools.clear()
+            phase = undefined
             if (!isActive(ctx)) {
                 stopTimer()
                 return
             }
             if (backgroundRuns.size > 0 || wakeTimer !== undefined) {
+                if (backgroundRuns.size > 0) {
+                    phase = {
+                        label: '等待后台任务',
+                        startedAt: performance.now(),
+                    }
+                }
                 // 完成事件也可能先于父任务 settled；给批量通知留出同样的唤醒窗口。
                 if (wakeTimer !== undefined) pendingFinishAt = performance.now()
                 render(ctx, true)
@@ -298,6 +417,8 @@ export default function piKit(pi: ExtensionAPI): void {
             lastCtx = ctx
             isShutdown = true
             agentActive = false
+            phase = undefined
+            runningTools.clear()
             backgroundRuns.clear()
             clearWakeTimer()
             sessionIdentities = new Set()

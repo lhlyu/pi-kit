@@ -5,10 +5,10 @@ Pi Coding Agent 的模型自动发现与终端状态栏扩展。
 ## 功能
 
 - **模型自动发现**：从多个 Provider 获取模型列表，通过原生 `/model` 选择和刷新。
-- **终端状态栏**：显示输出速度（TPS）、首 token 耗时（TTFT）和本轮耗时（TS），支持后台子任务计时。
+- **终端状态栏**：显示当前执行状态和耗时，以及输出速度（TPS）、首 token 耗时（TTFT）和本轮耗时（TS）。
 
 ```text
-⚡️ TPS: 50.0 tok/s 🚀 TTFT: 1.23s ⌛️ TS: 2m35s
+⚡️ TPS: 50.0 tok/s 🚀 TTFT: 1.23s ⌛️ TS: 2m35s │ 正在运行 npm test · 42s
 ```
 
 ## 安装

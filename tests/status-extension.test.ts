@@ -5,6 +5,7 @@ import type {
     ExtensionAPI,
     ExtensionContext,
 } from '@earendil-works/pi-coding-agent'
+import { visibleWidth } from '@earendil-works/pi-tui'
 import piKit from '../src/status-extension.ts'
 
 function harness(t: TestContext, mode: ExtensionContext['mode'] = 'tui') {
@@ -17,7 +18,21 @@ function harness(t: TestContext, mode: ExtensionContext['mode'] = 'tui') {
     let now = 0
     let sessionId = 'session-1'
     let sessionFile: string | undefined
+    let columns = 120
 
+    const originalColumns = Object.getOwnPropertyDescriptor(
+        process.stdout,
+        'columns',
+    )
+    Object.defineProperty(process.stdout, 'columns', {
+        configurable: true,
+        get: () => columns,
+    })
+    t.after(() => {
+        if (originalColumns)
+            Object.defineProperty(process.stdout, 'columns', originalColumns)
+        else Reflect.deleteProperty(process.stdout, 'columns')
+    })
     t.mock.timers.enable({ apis: ['setInterval', 'setTimeout'] })
     const intervals = t.mock.method(globalThis, 'setInterval')
     const timeouts = t.mock.method(globalThis, 'setTimeout')
@@ -82,6 +97,9 @@ function harness(t: TestContext, mode: ExtensionContext['mode'] = 'tui') {
         setSessionFile(file: string | undefined) {
             sessionFile = file
         },
+        setColumns(width: number) {
+            columns = width
+        },
         tick(ms: number) {
             now += ms
             t.mock.timers.tick(ms)
@@ -99,6 +117,8 @@ test('工厂只注册必要事件，不启动计时器或提供配置命令', (t
             'turn_start',
             'message_update',
             'message_end',
+            'tool_execution_start',
+            'tool_execution_end',
             'agent_settled',
             'session_shutdown',
         ],
@@ -118,6 +138,103 @@ test('工厂只注册必要事件，不启动计时器或提供配置命令', (t
     )
     h.tick(5_000)
     assert.equal(h.updates.length, 1)
+})
+
+test('依次显示模型等待、生成和命令耗时，工具结束后清除', (t) => {
+    const h = harness(t)
+    h.emit('agent_start')
+    h.emit('turn_start')
+    h.tick(1_000)
+    assert.match(h.updates.at(-1) ?? '', / │ 等待模型响应 · 1s$/)
+
+    h.emit('message_update', {
+        assistantMessageEvent: { type: 'toolcall_delta', delta: 'x' },
+    })
+    h.tick(1_000)
+    assert.match(h.updates.at(-1) ?? '', / │ 模型生成中 · 1s$/)
+    h.emit('message_end', { message: { role: 'assistant' } })
+    h.emit('tool_execution_start', {
+        toolCallId: 'bash-1',
+        toolName: 'bash',
+        args: { command: 'npm test' },
+    })
+    assert.match(h.updates.at(-1) ?? '', / │ 正在运行 npm test · 0s$/)
+    h.tick(42_000)
+    assert.match(
+        h.updates.at(-1) ?? '',
+        /^⚡️.*TPS: .*TTFT: .*TS: 44s │ 正在运行 npm test · 42s$/,
+    )
+
+    h.emit('tool_execution_end', { toolCallId: 'bash-1', isError: true })
+    assert.match(h.updates.at(-1) ?? '', /^⚡️.*TS: 44s$/)
+    h.emit('turn_start')
+    assert.match(h.updates.at(-1) ?? '', / │ 等待模型响应 · 0s$/)
+    h.emit('agent_settled', { aborted: true })
+    assert.match(h.updates.at(-1) ?? '', /^⚡️.*TS: 44s$/)
+})
+
+test('并行和嵌套调用显示仍在运行的工具，收起长命令', (t) => {
+    const h = harness(t)
+    h.emit('agent_start')
+    h.emit('tool_execution_start', {
+        toolCallId: 'parent',
+        toolName: 'codemode',
+        args: { code: 'long script' },
+    })
+    h.tick(1_000)
+    h.emit('tool_execution_start', {
+        toolCallId: 'parent/1',
+        parentToolCallId: 'parent',
+        toolName: 'bash',
+        args: {
+            command:
+                '\x1b[31mnpm\x1b[0m\ttest\u202e\n&& echo a-very-long-argument',
+        },
+    })
+    assert.match(
+        h.updates.at(-1) ?? '',
+        / │ 正在运行 npm test && echo a-very… · 0s$/,
+    )
+    h.emit('tool_execution_start', { toolCallId: 'read-1', toolName: 'read' })
+    assert.match(h.updates.at(-1) ?? '', / │ 正在运行 read · 0s$/)
+    h.emit('tool_execution_end', { toolCallId: 'parent/1' })
+    assert.match(h.updates.at(-1) ?? '', / │ 正在运行 read · 0s$/)
+    h.tick(1_000)
+    h.emit('tool_execution_end', { toolCallId: 'read-1' })
+    assert.match(h.updates.at(-1) ?? '', / │ 正在运行 codemode · 2s$/)
+
+    h.emit('agent_settled', { aborted: true })
+    assert.match(h.updates.at(-1) ?? '', /^⚡️.*TS: 2s$/)
+    h.emit('tool_execution_start', {
+        toolCallId: 'late',
+        toolName: 'bash',
+        args: { command: 'npm test' },
+    })
+    h.emit('agent_start')
+    assert.match(h.updates.at(-1) ?? '', /^⚡️.*TS: 0s$/)
+})
+
+test('缩窄终端后收起命令预览，保留行尾计时', (t) => {
+    const h = harness(t)
+    h.setColumns(80)
+    h.emit('agent_start')
+    h.emit('tool_execution_start', {
+        toolCallId: 'bash-1',
+        toolName: 'bash',
+        args: { command: 'npm test && echo 一二三四五六七八九十' },
+    })
+    h.tick(42_000)
+    const wide = h.updates.at(-1) ?? ''
+    assert.ok(visibleWidth(wide) <= 80)
+    assert.match(wide, /TS: 42s │ 正在运行 npm test.*… · 42s$/)
+
+    h.setColumns(60)
+    h.emit('tool_execution_start', null)
+    h.emit('tool_execution_end', null)
+    h.tick(1_000)
+    const narrow = h.updates.at(-1) ?? ''
+    assert.ok(visibleWidth(narrow) <= 60)
+    assert.match(narrow, /TS: 43s │ npm test.*… · 43s$/)
 })
 
 test('等待首字时持续计时，结束后强制更新且停止计时器', (t) => {
@@ -447,6 +564,12 @@ for (const mode of ['rpc', 'json', 'print'] as const) {
         h.emit('message_end', {
             message: { role: 'assistant', usage: { output: 10 } },
         })
+        h.emit('tool_execution_start', {
+            toolCallId: 'bash-1',
+            toolName: 'bash',
+            args: { command: 'npm test' },
+        })
+        h.emit('tool_execution_end', { toolCallId: 'bash-1' })
         h.emit('agent_end')
         h.emit('agent_settled')
         h.emit('session_shutdown')
@@ -850,14 +973,14 @@ test('后台子任务运行期间 TS 继续计时，最后一个任务结束后�
     })
     h.emit('agent_settled')
     h.tick(2_000)
-    assert.match(h.updates.at(-1) ?? '', /TS: 3s$/)
+    assert.match(h.updates.at(-1) ?? '', /TS: 3s │ 等待后台任务 · 2s$/)
 
     h.emitEvent('subagent:async-complete', {
         id: 'run-1',
         sessionId: 'session-1',
         triggerTurn: false,
     })
-    assert.match(h.updates.at(-1) ?? '', /TS: 3s$/)
+    assert.match(h.updates.at(-1) ?? '', /^⚡️.*TS: 3s$/)
     const count = h.updates.length
     h.tick(5_000)
     assert.equal(h.updates.length, count)
@@ -937,7 +1060,7 @@ test('多个后台任务全部结束才冻结；其他会话的任务不影响�
         triggerTurn: false,
     })
     h.tick(1_000)
-    assert.match(h.updates.at(-1) ?? '', /TS: 2s$/)
+    assert.match(h.updates.at(-1) ?? '', /TS: 2s │ 等待后台任务 · 1s$/)
     h.emitEvent('subagent:async-complete', {
         id: 'run-2',
         sessionId: 'session-1',
@@ -1032,7 +1155,7 @@ test('后台事件用会话文件路径标识时也能继续计时', (t) => {
     h.tick(1_000)
     h.emit('agent_settled')
     h.tick(1_000)
-    assert.match(h.updates.at(-1) ?? '', /TS: 2s$/)
+    assert.match(h.updates.at(-1) ?? '', /TS: 2s │ 等待后台任务 · 1s$/)
     h.emitEvent('subagent:async-complete', {
         id: 'run-1',
         sessionId: '/tmp/session.jsonl',
